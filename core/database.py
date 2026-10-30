@@ -11,7 +11,35 @@ load_dotenv()
 MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 if not MONGODB_URI:
     logging.error("❌ MONGODB_URI is not set in environment variables!")
-DATABASE_NAME = "GROUPHELP"
+
+def resolve_database_name(uri: str = None) -> str:
+    """
+    Resolve the database name with proper separation from other bots.
+    Priority:
+      1. DATABASE_NAME / MONGO_DB_NAME / MONGO_DATABASE environment variables
+      2. Database path in the MongoDB URI (e.g. mongodb+srv://.../Doraemon?...)
+      3. Default fallback: 'Doraemon' (ensuring full isolation from Titanic Saver's 'GROUPHELP')
+    """
+    for key in ("DATABASE_NAME", "MONGO_DB_NAME", "MONGO_DATABASE"):
+        val = os.getenv(key)
+        if val and val.strip():
+            return val.strip()
+
+    cand_uri = uri or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI") or MONGODB_URI
+    if cand_uri:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(cand_uri)
+            db_from_path = parsed.path.lstrip("/").split("?")[0].strip()
+            if db_from_path:
+                return db_from_path
+        except Exception:
+            pass
+
+    return "Doraemon"
+
+DATABASE_NAME = resolve_database_name()
+COLLECTION_PREFIX = os.getenv("COLLECTION_PREFIX", "").strip()
 
 # Global database client and database instances
 client = None
@@ -29,6 +57,7 @@ def connect_to_mongodb():
         logging.error("❌ MONGODB_URI is not set!")
         return False
         
+    db_name = resolve_database_name(uri)
     try:
         if client is None:
             # Try multiple connection strategies
@@ -48,8 +77,8 @@ def connect_to_mongodb():
                     maxIdleTimeMS=60000
                 )
                 client.admin.command('ping')
-                db = client[DATABASE_NAME]
-                logging.info(f"✅ Successfully connected to MongoDB: {DATABASE_NAME}")
+                db = client[db_name]
+                logging.info(f"✅ Successfully connected to MongoDB database: {db_name}")
                 return True
             except Exception as e1:
                 logging.warning(f"First connection strategy failed: {e1}")
@@ -65,8 +94,8 @@ def connect_to_mongodb():
                         socketTimeoutMS=10000
                     )
                     client.admin.command('ping')
-                    db = client[DATABASE_NAME]
-                    logging.info(f"✅ Successfully connected to MongoDB (system CA): {DATABASE_NAME}")
+                    db = client[db_name]
+                    logging.info(f"✅ Successfully connected to MongoDB (system CA): {db_name}")
                     return True
                 except Exception as e2:
                     logging.warning(f"Second connection strategy failed: {e2}")
@@ -81,8 +110,8 @@ def connect_to_mongodb():
                         socketTimeoutMS=10000
                     )
                     client.admin.command('ping')
-                    db = client[DATABASE_NAME]
-                    logging.warning(f"⚠️  Connected to MongoDB with TLS disabled (insecure!)")
+                    db = client[db_name]
+                    logging.warning(f"⚠️  Connected to MongoDB with TLS disabled (insecure!): {db_name}")
                     return True
                 
         return True
@@ -109,7 +138,8 @@ def get_collection(collection_name):
     database = get_database()
     if database is None:
         return None
-    return database[collection_name]
+    actual_name = f"{COLLECTION_PREFIX}{collection_name}" if COLLECTION_PREFIX else collection_name
+    return database[actual_name]
 
 def is_connected():
     """Check if MongoDB is connected."""
@@ -141,13 +171,12 @@ COLLECTIONS = {
 
 def get_all_chats():
     """Get all unique chat IDs from the settings collection."""
-    database = get_database()
-    if database is None:
+    settings_col = get_collection(COLLECTIONS["settings"])
+    if settings_col is None:
         logging.error("Cannot get chats - database not connected")
         return []
     
     try:
-        settings_col = database[COLLECTIONS["settings"]]
         chats = settings_col.find({}, {"chat_id": 1})
         return list(chats)
     except Exception as e:
@@ -163,45 +192,45 @@ def initialize_collections():
     
     try:
         # Users collection indexes
-        users_col = database[COLLECTIONS["users"]]
+        users_col = get_collection(COLLECTIONS["users"])
         users_col.create_index("id", unique=True)
         users_col.create_index("username")
         
         # Settings collection indexes
-        settings_col = database[COLLECTIONS["settings"]]
+        settings_col = get_collection(COLLECTIONS["settings"])
         settings_col.create_index("chat_id", unique=True)
         
         # Warns collection indexes
-        warns_col = database[COLLECTIONS["warns"]]
+        warns_col = get_collection(COLLECTIONS["warns"])
         warns_col.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
         
         # Muters collection indexes
-        muters_col = database[COLLECTIONS["muters"]]
+        muters_col = get_collection(COLLECTIONS["muters"])
         muters_col.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
         
         # Voice chat managers indexes
-        vcm_col = database[COLLECTIONS["voice_chat_managers"]]
+        vcm_col = get_collection(COLLECTIONS["voice_chat_managers"])
         vcm_col.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
         
         # Banned channels indexes
-        banned_col = database[COLLECTIONS["banned_channels"]]
+        banned_col = get_collection(COLLECTIONS["banned_channels"])
         banned_col.create_index([("chat_id", 1), ("channel_id", 1)], unique=True)
         
         # Blocked content indexes
-        blocked_col = database[COLLECTIONS["blocked_content"]]
+        blocked_col = get_collection(COLLECTIONS["blocked_content"])
         blocked_col.create_index("chat_id")
 
         # Hidden messages indexes
-        hidden_col = database[COLLECTIONS["hidden_messages"]]
+        hidden_col = get_collection(COLLECTIONS["hidden_messages"])
         hidden_col.create_index("msg_id", unique=True)
         hidden_col.create_index("expires_at", expireAfterSeconds=0) # Auto cleanup
         
         # Filters indexes
-        filters_col = database[COLLECTIONS["filters"]]
+        filters_col = get_collection(COLLECTIONS["filters"])
         filters_col.create_index([("chat_id", 1), ("trigger", 1)], unique=True)
 
         # Admins collection indexes
-        admins_col = database[COLLECTIONS["admins"]]
+        admins_col = get_collection(COLLECTIONS["admins"])
         admins_col.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
         
         logging.info("✅ MongoDB collections and indexes initialized successfully")
