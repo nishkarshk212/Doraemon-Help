@@ -94,7 +94,11 @@ async def start_voice_chat_monitor(application: Application):
         return
 
     logger.info("🎙 Starting Voice Chat Monitor...")
-    telethon_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+    try:
+        telethon_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+    except Exception as e:
+        logger.warning(f"⚠️ Telethon StringSession invalid or incompatible: {e}. VC join notifications disabled.")
+        return
 
     # Register Telethon event handlers BEFORE connecting to avoid missing events
     @telethon_client.on(events.Raw(UpdateGroupCall))
