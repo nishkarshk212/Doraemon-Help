@@ -62,9 +62,6 @@ def _start_keyboard(add_to_group_url):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(colored_button(to_small_caps("ᴀᴅᴅ ᴍᴇ ɪɴ ɢʀᴏᴜᴘ"), "green"), url=add_to_group_url)],
         [
-            InlineKeyboardButton(colored_button("𝗠𝘂𝘀𝗶𝗰 𝗪𝗼𝗿𝗹𝗱", "green"), callback_data="music_world")
-        ],
-        [
             InlineKeyboardButton(colored_button(to_small_caps("「 Support 」"), "green"), url="https://t.me/titanic_network"),
             InlineKeyboardButton(colored_button(to_small_caps("「 Updates 」"), "green"), url="https://t.me/Developer_World_Advay")
         ],
