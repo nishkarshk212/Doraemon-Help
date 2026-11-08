@@ -2323,91 +2323,50 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
 
-    if data == "set_view_nsfw":
-        settings = get_chat_settings(chat_id)
-        try:
-            await edit_bot_response(
-                query, context,
-                "🔞 <b>NSFW Filter Settings</b>\n\n"
-                "Automatically detect and filter NSFW/adult content (images, webp and webm stickers) using AI vision models.\n\n"
-                "Note: Webm animated/video stickers are supported by extracting a frame and inspecting it.\n\n"
-                "Current settings:",
-                reply_markup=get_nsfw_settings_keyboard(settings),
-                parse_mode='HTML'
-            )
-        except BadRequest: pass
-        await query.answer()
-        return
+    if data == "set_view_nsfw" or data.startswith("nsfw_"):
+        from features.nsfw_panel import handle_nsfw_callback, get_nsfw_panel_keyboard, render_nsfw_panel_text
+        if data == "set_view_nsfw":
+            settings = get_chat_settings(chat_id)
+            title = update.effective_chat.title or "This Chat"
+            text = render_nsfw_panel_text(title, settings)
+            try:
+                await edit_bot_response(
+                    query, context,
+                    text,
+                    reply_markup=get_nsfw_panel_keyboard(chat_id, settings),
+                    parse_mode='HTML'
+                )
+            except BadRequest: pass
+            await query.answer()
+            return
+        else:
+            await handle_nsfw_callback(update, context)
+            return
 
     if data == "set_view_nsfw_threshold_options":
-        settings = get_chat_settings(chat_id)
-        try:
-            await edit_bot_response(
-                query, context,
-                "🔞 <b>NSFW Strictness Threshold</b>\n\n"
-                "Configure how sensitive the NSFW filter is. A higher strictness (lower threshold number) will match and flag content more easily.\n\n"
-                "Select a strictness level:",
-                reply_markup=get_nsfw_threshold_keyboard(settings),
-                parse_mode='HTML'
-            )
-        except BadRequest: pass
-        await query.answer()
+        from features.nsfw_panel import handle_nsfw_callback
+        query.data = f"nsfw_view_thresholds:{chat_id}"
+        await handle_nsfw_callback(update, context)
         return
 
     if data == "set_toggle_nsfw_filter":
-        settings = get_chat_settings(chat_id)
-        current = settings.get("nsfw_filter_enabled", False)
-        update_chat_setting(chat_id, "nsfw_filter_enabled", not current)
-        settings = get_chat_settings(chat_id)
-        try:
-            await edit_bot_response(
-                query, context,
-                "🔞 <b>NSFW Filter Settings</b>\n\n"
-                "Automatically detect and filter NSFW/adult content (images, webp and webm stickers) using AI vision models.\n\n"
-                "Note: Webm animated/video stickers are supported by extracting a frame and inspecting it.\n\n"
-                "Current settings:",
-                reply_markup=get_nsfw_settings_keyboard(settings),
-                parse_mode='HTML'
-            )
-        except BadRequest: pass
-        await query.answer(f"NSFW filter {'enabled' if not current else 'disabled'}")
+        from features.nsfw_panel import handle_nsfw_callback
+        query.data = f"nsfw_toggle_filter:{chat_id}"
+        await handle_nsfw_callback(update, context)
         return
 
     if data.startswith("set_nsfw_action_"):
+        from features.nsfw_panel import handle_nsfw_callback
         action = data.replace("set_nsfw_action_", "")
-        update_chat_setting(chat_id, "nsfw_action", action)
-        settings = get_chat_settings(chat_id)
-        try:
-            await edit_bot_response(
-                query, context,
-                "🔞 <b>NSFW Filter Settings</b>\n\n"
-                "Automatically detect and filter NSFW/adult content (images, webp and webm stickers) using AI vision models.\n\n"
-                "Note: Webm animated/video stickers are supported by extracting a frame and inspecting it.\n\n"
-                "Current settings:",
-                reply_markup=get_nsfw_settings_keyboard(settings),
-                parse_mode='HTML'
-            )
-        except BadRequest: pass
-        await query.answer(f"NSFW penalty action set to {action}")
+        query.data = f"nsfw_set_action:{action}:{chat_id}"
+        await handle_nsfw_callback(update, context)
         return
 
     if data.startswith("set_nsfw_threshold_"):
+        from features.nsfw_panel import handle_nsfw_callback
         threshold_str = data.replace("set_nsfw_threshold_", "")
-        threshold = float(threshold_str)
-        update_chat_setting(chat_id, "nsfw_threshold", threshold)
-        settings = get_chat_settings(chat_id)
-        try:
-            await edit_bot_response(
-                query, context,
-                "🔞 <b>NSFW Filter Settings</b>\n\n"
-                "Automatically detect and filter NSFW/adult content (images, webp and webm stickers) using AI vision models.\n\n"
-                "Note: Webm animated/video stickers are supported by extracting a frame and inspecting it.\n\n"
-                "Current settings:",
-                reply_markup=get_nsfw_settings_keyboard(settings),
-                parse_mode='HTML'
-            )
-        except BadRequest: pass
-        await query.answer(f"NSFW strictness threshold set to {threshold}")
+        query.data = f"nsfw_set_threshold:{threshold_str}:{chat_id}"
+        await handle_nsfw_callback(update, context)
         return
 
     if data == "set_toggle_ui_layout":
@@ -2919,9 +2878,11 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif val == "minus":
             new_limit = max(0, current_limit - 50)
         else:
-            new_limit = int(val)
+            new_limit = max(0, int(val))
             
         update_chat_setting(chat_id, "msg_length_limit", new_limit)
+        update_chat_setting(chat_id, "msg_length_max", new_limit)
+        update_chat_setting(chat_id, "msg_length_delete", new_limit > 0)
         new_settings = get_chat_settings(chat_id)
         try:
             await query.edit_message_reply_markup(reply_markup=get_msg_length_settings_keyboard(new_settings))
@@ -3349,8 +3310,17 @@ async def handle_setting_input(update: Update, context: ContextTypes.DEFAULT_TYP
             success = True
     elif config_type == "limit":
         if section == "msg_length":
-            # Explicitly fail for custom message length as requested
-            success = False
+            if update.message.text and update.message.text.strip().isdigit():
+                new_limit = max(0, int(update.message.text.strip()))
+                update_chat_setting(chat_id, "msg_length_limit", new_limit)
+                update_chat_setting(chat_id, "msg_length_max", new_limit)
+                update_chat_setting(chat_id, "msg_length_delete", new_limit > 0)
+                success = True
+            elif update.message.text and update.message.text.strip().lower() in ["off", "disable", "none", "0"]:
+                update_chat_setting(chat_id, "msg_length_limit", 0)
+                update_chat_setting(chat_id, "msg_length_max", 0)
+                update_chat_setting(chat_id, "msg_length_delete", False)
+                success = True
         elif update.message.text and update.message.text.isdigit():
             update_chat_setting(chat_id, setting_key, int(update.message.text))
             success = True
@@ -3410,5 +3380,6 @@ def get_settings_handlers():
         CallbackQueryHandler(settings_callback, pattern="^set_"),
         CallbackQueryHandler(settings_callback, pattern="^settings_"),
         CallbackQueryHandler(settings_callback, pattern="^mgmt_"),
+        CallbackQueryHandler(settings_callback, pattern="^nsfw_"),
         MessageHandler(filters.ALL & ~filters.COMMAND, handle_setting_input)
     ]

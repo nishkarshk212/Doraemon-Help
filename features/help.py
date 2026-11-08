@@ -49,6 +49,10 @@ def get_help_keyboard():
         ],
         [
             InlineKeyboardButton(colored_button("🌐 Translator", "default"), callback_data="help_tr"),
+            InlineKeyboardButton(colored_button("⚡ Multi-Task", "blue"), callback_data="help_multitask")
+        ],
+        [
+            InlineKeyboardButton(colored_button("🔞 NSFW Guard", "red"), callback_data="help_nsfw"),
             InlineKeyboardButton(colored_button("❌ Close", "red"), callback_data="help_close")
         ]
     ]
@@ -142,7 +146,9 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /free - Exempt a user from specific blocking rules (Admins only).\n"
             "• /unfree - Remove all exemptions from a user.\n\n"
             "📏 <b>ᴍᴇꜱꜱᴀɢᴇ ʟᴇɴɢᴛʜ ʟɪᴍɪᴛ</b>\n\n"
-            "Configure a maximum character limit for messages in /config > Message Length. Messages exceeding this limit will be automatically deleted.\n\n"
+            "Configure a maximum character limit for messages via `/maxlength <number>` or in /config > Message Length. Messages exceeding this limit will be automatically deleted.\n"
+            "• /maxlength &lt;limit&gt; - Set maximum allowed characters (e.g. /maxlength 200)\n"
+            "• /maxlength off - Disable character length limits\n\n"
             "🚧 <b>ʙʟᴏᴄᴋɪɴɢ ꜱᴇᴛᴛɪɴɢꜱ</b>\n\n"
             "Toggle specific content types (Text, Stickers, Links, etc.) in /config > Deleting Messages > Block cancellation.\n\n"
             "<i>Note: Admins are exempt from these checks.</i>"
@@ -173,6 +179,50 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /tl &lt;text&gt; - Open translation menu for text\n"
             "• /langs - View list of supported language codes\n\n"
             "Example: <code>/tr hi Hello</code> translates 'Hello' to Hindi."
+        )
+    elif data == "help_multitask":
+        help_text = (
+            "⚡ <b>Multi-Task & Self ID Tools</b>\n\n"
+            "📢 <b>Smart Tagger:</b>\n"
+            "• /tag [msg] or /utag [msg] - Tag group members with custom message\n"
+            "• /etag [msg] - Tag members decorated with emojis\n"
+            "• /admintag [msg] - Tag all group administrators\n"
+            "• /ftag [msg] - Fast turbo tagger\n"
+            "• /stop or /cancel - Instantly stop any active tagging session\n\n"
+            "🤖 <b>Auto-DM Responder:</b>\n"
+            "• /automsg on/off - Toggle automated PM responder\n"
+            "• /setautomsg [text] - Set custom auto-reply message\n"
+            "• /myautomsg - View your active auto-reply\n"
+            "• /resetautomsg - Reset auto-reply to default\n\n"
+            "💾 <b>SaveIt Media Saver:</b>\n"
+            "• /saveit (or /save) - Reply to any disappearing or restricted media to save directly to PM\n"
+            "• /autosave on/off - Toggle automatic saving of timed media\n\n"
+            "⭐ <b>Favorites & Shortcuts:</b>\n"
+            "• /addfav &lt;tag&gt; &lt;text/media&gt; - Save a shortcut\n"
+            "• /remfav &lt;tag&gt; - Remove a saved favorite\n"
+            "• /favs - List all your saved favorites\n"
+            "• /getfav &lt;tag&gt; - Retrieve a saved favorite\n\n"
+            "🔐 <b>Account Link:</b>\n"
+            "• /login &lt;session&gt; - Link your user string session (in PM)\n"
+            "• /myaccount - Check your account connection status\n"
+            "• /logout - Unlink your session safely"
+        )
+    elif data == "help_nsfw":
+        help_text = (
+            "🔞 <b>AI NSFW & Content Safeguard</b>\n\n"
+            "State-of-the-art multi-stage content moderation detecting nudity, weapons, gore, drugs/alcohol, and prohibited content in text, stickers, photos, videos, and GIFs.\n\n"
+            "<b>Commands:</b>\n"
+            "• <code>/nsfw</code> or <code>/safeguard</code> - Open the full interactive NSFW Safeguard settings panel\n"
+            "• <code>/scan</code> - Reply to any message or media to scan and view a detailed confidence report\n"
+            "• <code>/whitelist @user</code> - Exempt a user from NSFW scanning\n"
+            "• <code>/unwhitelist @user</code> - Remove a user from the whitelist\n"
+            "• <code>/whitelisted</code> - View list of whitelisted members\n\n"
+            "<b>Interactive Panel Controls:</b>\n"
+            "• <b>Master Filter:</b> Toggle ON / OFF\n"
+            "• <b>7 Categories:</b> Individually toggle Sexual/Nudity, Weapons, Violence, Drugs/Alcohol, Self Harm, Hate, and Harassment\n"
+            "• <b>Actions:</b> Delete, Warn, Mute (1 hr), Ban, Kick, or Log Only\n"
+            "• <b>Sensitivity:</b> Low (40%), Medium (65%), High (80%), or Max Strict (90%)\n"
+            "• <b>Live Stats:</b> Track total analyzed, flagged, and category breakdown"
         )
 
     keyboard = [[InlineKeyboardButton(colored_button("🔙 Back", "default"), callback_data="help_main")]]

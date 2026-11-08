@@ -309,117 +309,36 @@ async def check_blocked_content_handler(update: Update, context: ContextTypes.DE
                 logging.error(f"Failed to kick user: {e}")
         return
 
-    # Check NSFW content using OpenRouter
+    # Check NSFW content using integrated NSFW Safeguard engine
     settings = get_chat_settings(chat_id)
     if settings.get("nsfw_filter_enabled", False):
-        photo = None
-        sticker = None
-        document = None
-        video = None
+        from features.nsfw_panel import process_nsfw_moderation
+        handled = await process_nsfw_moderation(update, context)
+        if handled:
+            return
 
-        if update.message.photo:
-            photo = update.message.photo[-1]
-        elif update.message.sticker:
-            sticker = update.message.sticker
-        elif update.message.document:
-            document = update.message.document
-        elif update.message.video:
-            video = update.message.video
-
-        is_supported = False
-        file_to_download = None
-        ext = ""
-
-        if photo:
-            is_supported = True
-            file_to_download = photo
-            ext = ".jpg"
-        elif sticker:
-            if sticker.is_video:
-                is_supported = True
-                file_to_download = sticker
-                ext = ".webm"
-            elif not sticker.is_animated:
-                is_supported = True
-                file_to_download = sticker
-                ext = ".webp"
-        elif document:
-            mime = document.mime_type or ""
-            filename = document.file_name or ""
-            if mime.startswith("image/") or filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                is_supported = True
-                file_to_download = document
-                ext = os.path.splitext(filename)[1] or ".jpg"
-            elif mime.startswith("video/") or filename.lower().endswith((".webm", ".mp4")):
-                is_supported = True
-                file_to_download = document
-                ext = os.path.splitext(filename)[1] or ".webm"
-        elif video:
-            is_supported = True
-            file_to_download = video
-            ext = ".mp4"
-
-        if is_supported and file_to_download:
-            try:
-                import os
-                bot_file = await context.bot.get_file(file_to_download.file_id)
-                temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_nsfw")
-                os.makedirs(temp_dir, exist_ok=True)
-                temp_path = os.path.join(temp_dir, f"{file_to_download.file_id}{ext}")
-                await bot_file.download_to_drive(temp_path)
-
-                from moderation.nsfw_detector import check_nsfw_via_openrouter
-                threshold = settings.get("nsfw_threshold", 0.7)
-                is_nsfw, score = check_nsfw_via_openrouter(temp_path, threshold)
-
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
-
-                if is_nsfw:
-                    try:
-                        await update.message.delete()
-                    except Exception as e:
-                        logging.error(f"Failed to delete NSFW content: {e}")
-
-                    if user_id == OWNER_ID or await is_user_admin(chat_id, user_id, context):
-                        logging.info(f"NSFW content deleted from admin/owner {user_id} in {chat_id}. Skipping penalties.")
-                        return
-
-                    penalty = settings.get("nsfw_action", "delete")
-                    if penalty == "warn":
-                        from handlers.blocking_handler import send_blocking_notification
-                        await send_blocking_notification(
-                            update, context, settings,
-                            f"⚠️ User <code>{user_id}</code>, your message was deleted because it was detected as containing NSFW content."
-                        )
-                    elif penalty == "mute":
-                        try:
-                            await context.bot.restrict_chat_member(chat_id, user_id, permissions=ChatPermissions(can_send_messages=False))
-                            await context.bot.send_message(chat_id, f"🔇 User <code>{user_id}</code> has been muted for posting NSFW content.", parse_mode=ParseMode.HTML)
-                        except Exception as e:
-                            logging.error(f"Failed to mute user for NSFW: {e}")
-                    elif penalty == "ban":
-                        try:
-                            await context.bot.ban_chat_member(chat_id, user_id)
-                            await context.bot.send_message(chat_id, f"🚫 User <code>{user_id}</code> has been banned for posting NSFW content.", parse_mode=ParseMode.HTML)
-                        except Exception as e:
-                            logging.error(f"Failed to ban user for NSFW: {e}")
-                    elif penalty == "kick":
-                        try:
-                            await context.bot.ban_chat_member(chat_id, user_id)
-                            await context.bot.unban_chat_member(chat_id, user_id)
-                            await context.bot.send_message(chat_id, f"👞 User <code>{user_id}</code> has been kicked for posting NSFW content.", parse_mode=ParseMode.HTML)
-                        except Exception as e:
-                            logging.error(f"Failed to kick user for NSFW: {e}")
-                    return
-            except Exception as e:
-                logging.error(f"Error checking NSFW: {e}")
-
-    # Check message length (admins/owner are exempt from length limits usually, keeping it that way)
+    # Check message length (admins/owner are exempt from length limits)
     if user_id == OWNER_ID or await is_user_admin(chat_id, user_id, context):
         return
+
+    msg_content = (update.message.text or "") + (update.message.caption or "")
+    if msg_content:
+        limit = settings.get("msg_length_limit", 0)
+        max_l = settings.get("msg_length_max", 0)
+        effective_limit = limit if limit > 0 else (max_l if (settings.get("msg_length_delete", False) and max_l > 0) or (max_l > 0 and max_l != 2000) else 0)
+        if effective_limit > 0 and len(msg_content) > effective_limit:
+            try:
+                await update.message.delete()
+                from handlers.blocking_handler import send_blocking_notification
+                await send_blocking_notification(
+                    update, context, settings,
+                    f"📏 <b>Message too long!</b>\n\n"
+                    f"User <code>{user_id}</code>, your message exceeded the allowed limit of <b>{effective_limit}</b> characters "
+                    f"({len(msg_content)}/{effective_limit})."
+                )
+            except Exception as e:
+                logging.error(f"Failed to delete message exceeding length limit: {e}")
+            return
 
 def get_block_content_handlers():
     return [

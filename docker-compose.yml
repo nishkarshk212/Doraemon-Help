@@ -1,0 +1,10 @@
+services:
+  doraemon-help:
+    build: .
+    container_name: doraemon-help-bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+

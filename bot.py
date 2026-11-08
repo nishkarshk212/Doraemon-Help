@@ -40,6 +40,8 @@ from features.font_normalizer import normalize_text
 from features.recurring import get_recurring_handlers, check_recurring_messages, count_recurring_messages
 from managers import get_manager_handlers
 from features.tagger import get_tagger_handlers
+from features.multitask import get_multitask_handlers
+from features.nsfw_panel import get_nsfw_handlers
 from features.doraemon_ai import get_doraemon_ai_handlers
 from core.config import BOT_TOKEN, LOG_CHANNEL_ID, OWNER_ID, log_to_channel, send_bot_response, send_bot_media, START_IMG, to_small_caps, colored_button
 from features.voice_chat import start_voice_chat_monitor, stop_voice_chat_monitor, get_voice_chat_handlers
@@ -1513,6 +1515,14 @@ def main():
     # Add Tagger handlers (Group 17)
     for handler in get_tagger_handlers():
         application.add_handler(handler, group=17)
+
+    # Add Multi-Task tools handlers (Group 0)
+    for handler in get_multitask_handlers():
+        application.add_handler(handler)
+
+    # Add NSFW Safeguard handlers (Group 0)
+    for handler in get_nsfw_handlers():
+        application.add_handler(handler)
 
     # Add Join Request handlers
     for handler in get_join_request_handlers():

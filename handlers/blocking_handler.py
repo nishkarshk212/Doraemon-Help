@@ -260,26 +260,50 @@ async def handle_blocking(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     should_delete = False
     penalty_reason = ""
+    is_length_violation = False
+    length_limit_val = 0
+    actual_length = 0
     
-    # Check Message Length (just delete, no penalties)
+    # Check Message Length
     if msg.text or msg.caption:
         content = (msg.text or "") + (msg.caption or "")
         length = len(content)
-        min_l = settings.get("msg_length_min", 0)
-        max_l = settings.get("msg_length_max", 2000)
+        actual_length = length
         
-        logging.info(f"[BLOCKING] Message length check: length={length}, min={min_l}, max={max_l}")
+        limit = settings.get("msg_length_limit", 0)
+        max_l = settings.get("msg_length_max", 0)
         
-        if length < min_l or length > max_l:
-            logging.info(f"[BLOCKING] Message length {length} outside range {min_l}-{max_l}")
+        # Determine effective maximum limit:
+        # Priority: msg_length_limit > 0 (set by /config or /maxlength)
+        # Or msg_length_delete is True and max_l > 0
+        # Or max_l > 0 and max_l != 2000 (explicitly customized)
+        if limit > 0:
+            effective_max = limit
+        elif settings.get("msg_length_delete", False) and max_l > 0:
+            effective_max = max_l
+        elif max_l > 0 and max_l != 2000:
+            effective_max = max_l
+        else:
+            effective_max = 0
             
-            # Check if user is admin - admins are exempt (including anonymous admins)
+        min_l = settings.get("msg_length_min", 0)
+        
+        logging.info(f"[BLOCKING] Message length check: length={length}, min={min_l}, effective_max={effective_max}")
+        
+        if effective_max > 0 and length > effective_max:
+            logging.info(f"[BLOCKING] Message length {length} exceeds maximum limit {effective_max}")
             is_admin = await is_admin_or_creator(context, chat_id, update.effective_user.id if update.effective_user else 0, msg)
             if not is_admin:
-                # Delete message if enabled
-                if settings.get("msg_length_delete"):
-                    logging.info(f"[BLOCKING] Deleting message - msg_length_delete enabled")
-                    should_delete = True
+                should_delete = True
+                is_length_violation = True
+                length_limit_val = effective_max
+        elif min_l > 0 and length < min_l:
+            logging.info(f"[BLOCKING] Message length {length} is below minimum {min_l}")
+            is_admin = await is_admin_or_creator(context, chat_id, update.effective_user.id if update.effective_user else 0, msg)
+            if not is_admin:
+                should_delete = True
+                is_length_violation = True
+                length_limit_val = min_l
 
     # Check if user is freed from specific blocking
     if not update.effective_user:
@@ -521,7 +545,15 @@ async def handle_blocking(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_forwarded_msg = (hasattr(msg, 'forward_origin') and msg.forward_origin is not None) or \
                               (hasattr(msg, 'forward_from') and msg.forward_from is not None)
             
-            if msg.audio and settings.get("block_audio"):
+            if is_length_violation:
+                user_id_str = update.effective_user.id if update.effective_user else 0
+                await send_blocking_notification(
+                    update, context, settings,
+                    f"📏 <b>Message too long!</b>\n\n"
+                    f"User <code>{user_id_str}</code>, your message exceeded the character limit of <b>{length_limit_val}</b> characters "
+                    f"(length: <b>{actual_length}</b>)."
+                )
+            elif msg.audio and settings.get("block_audio"):
                 await send_blocking_notification(
                     update, context, settings,
                     f"🎵 <b>Music files are not allowed in this group.</b>\n\n"
@@ -639,6 +671,55 @@ async def block_reactions_command(update: Update, context: ContextTypes.DEFAULT_
     
     status_text = "ENABLED ✅" if new_status else "DISABLED ❌"
     await send_bot_response(update, context, f"⚡ <b>Block Reactions:</b> {status_text}\n\nAll reactions from non-admins will now be {'deleted immediately' if new_status else 'allowed'}.")
+
+async def maxlength_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command to check or set message maximum character limit."""
+    if not update.effective_chat or update.effective_chat.type == "private":
+        return
+        
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else 0
+    
+    settings = get_chat_settings(chat_id)
+    current_limit = settings.get("msg_length_limit", 0)
+    if current_limit <= 0 and settings.get("msg_length_delete", False):
+        current_limit = settings.get("msg_length_max", 0)
+        
+    if not context.args:
+        status_text = f"<b>{current_limit} characters</b>" if current_limit > 0 else "<b>Disabled (Unlimited)</b>"
+        await send_bot_response(
+            update, context,
+            f"📏 <b>Message Length Limit:</b> {status_text}\n\n"
+            f"• To set limit: <code>/maxlength &lt;number&gt;</code> (e.g. <code>/maxlength 200</code>)\n"
+            f"• To disable: <code>/maxlength off</code>\n\n"
+            f"<i>You can also configure this interactively in /config &gt; Message Length.</i>"
+        )
+        return
+        
+    if not await can_user_ban(chat_id, user_id, context):
+        await send_bot_response(update, context, "Only admins with ban permission can change message length limits.")
+        return
+        
+    arg = context.args[0].lower().strip()
+    if arg in ["off", "disable", "none", "0"]:
+        update_chat_setting(chat_id, "msg_length_limit", 0)
+        update_chat_setting(chat_id, "msg_length_max", 0)
+        update_chat_setting(chat_id, "msg_length_delete", False)
+        await send_bot_response(update, context, "✅ <b>Message length limit disabled.</b> All message lengths are now permitted.")
+        return
+        
+    if arg.isdigit():
+        val = int(arg)
+        if val < 5:
+            await send_bot_response(update, context, "⚠️ Message length limit must be at least 5 characters.")
+            return
+        update_chat_setting(chat_id, "msg_length_limit", val)
+        update_chat_setting(chat_id, "msg_length_max", val)
+        update_chat_setting(chat_id, "msg_length_delete", True)
+        await send_bot_response(update, context, f"✅ <b>Message length limit set to {val} characters.</b> Messages exceeding this limit will be automatically deleted.")
+        return
+        
+    await send_bot_response(update, context, "⚠️ Invalid input. Usage: <code>/maxlength 200</code> or <code>/maxlength off</code>")
 
 async def free_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Command to exempt a user from specific blocking rules."""
@@ -932,6 +1013,7 @@ def get_blocking_command_handlers():
     return [
         CommandHandler("blocktext", block_text_command),
         CommandHandler("blockreaction", block_reactions_command),
+        CommandHandler(["maxlength", "length", "setlength"], maxlength_command),
         CommandHandler("free", free_command),
         CommandHandler("unfree", unfree_command),
         CallbackQueryHandler(free_permission_callback, pattern=r"^free_perms_"),
