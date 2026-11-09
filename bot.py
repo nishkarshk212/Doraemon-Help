@@ -42,7 +42,7 @@ from managers import get_manager_handlers
 from features.tagger import get_tagger_handlers
 from features.multitask import get_multitask_handlers
 from features.nsfw_panel import get_nsfw_handlers
-from features.high_protection import get_high_protection_handlers, _clean_trackers
+from features.high_protection import get_high_protection_handlers, clean_protection_trackers_job
 from features.protection_panel import get_protection_panel_handlers
 from features.doraemon_ai import get_doraemon_ai_handlers
 from core.config import BOT_TOKEN, LOG_CHANNEL_ID, OWNER_ID, log_to_channel, send_bot_response, send_bot_media, START_IMG, to_small_caps, colored_button
@@ -1539,7 +1539,7 @@ def main():
 
     # Tracker memory hygiene job
     if application.job_queue:
-        application.job_queue.run_repeating(lambda ctx: _clean_trackers(), interval=60, first=30)
+        application.job_queue.run_repeating(clean_protection_trackers_job, interval=60, first=30)
 
     # Add Join Request handlers
     for handler in get_join_request_handlers():

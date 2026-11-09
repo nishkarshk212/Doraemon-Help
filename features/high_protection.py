@@ -43,6 +43,10 @@ def _clean_trackers():
         if not DUPLICATE_MSG_TRACKER[key]:
             DUPLICATE_MSG_TRACKER.pop(key, None)
 
+async def clean_protection_trackers_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """JobQueue async callback for periodic memory cleanup."""
+    _clean_trackers()
+
 async def handle_anti_raid_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Detect mass join attacks and enforce immediate raid lockdown."""
     chat = update.effective_chat
