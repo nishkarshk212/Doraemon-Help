@@ -10,3 +10,4 @@ python-dotenv
 certifi
 dnspython
 Pillow
+pydantic
