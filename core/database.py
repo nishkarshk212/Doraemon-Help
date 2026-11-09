@@ -166,7 +166,9 @@ COLLECTIONS = {
     "filters": "filters",
     "group_muters": "group_muters",
     "admins": "admins",
-    "hidden_messages": "hidden_messages"
+    "hidden_messages": "hidden_messages",
+    "rankings": "chat_rankings",
+    "ranking_meta": "ranking_meta"
 }
 
 def get_all_chats():
@@ -232,6 +234,17 @@ def initialize_collections():
         # Admins collection indexes
         admins_col = get_collection(COLLECTIONS["admins"])
         admins_col.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
+
+        # Rankings collection indexes
+        rankings_col = get_collection(COLLECTIONS["rankings"])
+        if rankings_col is not None:
+            rankings_col.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
+            rankings_col.create_index([("chat_id", 1), ("total_messages", -1)])
+
+        # Ranking metadata indexes
+        meta_col = get_collection(COLLECTIONS["ranking_meta"])
+        if meta_col is not None:
+            meta_col.create_index("chat_id", unique=True)
         
         logging.info("✅ MongoDB collections and indexes initialized successfully")
         return True

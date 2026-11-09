@@ -256,7 +256,11 @@ DEFAULT_CHAT_SETTINGS = {
     "duplicate_spam_enabled": True,
     "duplicate_spam_limit": 3,
     "duplicate_spam_window": 10,
-    "anti_zalgo_enabled": True
+    "anti_zalgo_enabled": True,
+    # Ranking, Chat Score, Level-Up & Daily Top 10 settings
+    "ranking_enabled": True,
+    "daily_leaderboard_auto_post": True,
+    "level_up_alerts": True
 }
 
 def get_chat_settings(chat_id):

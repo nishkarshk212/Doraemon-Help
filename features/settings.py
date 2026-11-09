@@ -273,7 +273,8 @@ def get_main_settings_keyboard(chat_id):
              InlineKeyboardButton(colored_button("🛡️ Captcha", "blue"), callback_data="set_view_captcha")],
             [InlineKeyboardButton(colored_button("🛡️ Protect", "blue"), callback_data="set_view_protection"),
              InlineKeyboardButton(colored_button("🔞 NSFW", "blue"), callback_data="set_view_nsfw")],
-            [InlineKeyboardButton(colored_button("📋 Freed", "blue"), callback_data="free_list_members")],
+            [InlineKeyboardButton(colored_button("🏆 Ranking", "blue"), callback_data="set_view_ranking"),
+             InlineKeyboardButton(colored_button("📋 Freed", "blue"), callback_data="free_list_members")],
             [InlineKeyboardButton(colored_button("🎨 Layout: Small", "blue"), callback_data="set_toggle_ui_layout")],
             [InlineKeyboardButton(colored_button("❌ Close", "blue"), callback_data="set_close")]
         ]
@@ -305,6 +306,7 @@ def get_main_settings_keyboard(chat_id):
              InlineKeyboardButton(colored_button("🛡️ Captcha", "blue"), callback_data="set_view_captcha")],
             [InlineKeyboardButton(colored_button("🛡️ High Protection & Shield", "blue"), callback_data="set_view_protection")],
             [InlineKeyboardButton(colored_button("🔞 NSFW Filter", "blue"), callback_data="set_view_nsfw")],
+            [InlineKeyboardButton(colored_button("🏆 Chat Ranking & Activity", "blue"), callback_data="set_view_ranking")],
             [InlineKeyboardButton(colored_button("📋 Freed Members", "blue"), callback_data="free_list_members")],
             [InlineKeyboardButton(colored_button("🎨 Layout: Large", "blue"), callback_data="set_toggle_ui_layout")],
             [InlineKeyboardButton(colored_button("❌ Close Menu", "blue"), callback_data="set_close")]
@@ -2343,6 +2345,26 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         else:
             await handle_protection_callback(update, context)
+            return
+
+    if data == "set_view_ranking" or data.startswith("rank_set_"):
+        from features.ranking import handle_ranking_panel_callback, get_ranking_panel_keyboard, render_ranking_panel_text
+        if data == "set_view_ranking":
+            settings = get_chat_settings(chat_id)
+            title = update.effective_chat.title or "This Chat"
+            text = render_ranking_panel_text(title, settings)
+            try:
+                await edit_bot_response(
+                    query, context,
+                    text,
+                    reply_markup=get_ranking_panel_keyboard(chat_id, settings),
+                    parse_mode='HTML'
+                )
+            except BadRequest: pass
+            await query.answer()
+            return
+        else:
+            await handle_ranking_panel_callback(update, context)
             return
 
     if data == "set_view_nsfw" or data.startswith("nsfw_"):

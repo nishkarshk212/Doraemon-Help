@@ -56,6 +56,7 @@ def get_help_keyboard():
             InlineKeyboardButton(colored_button("🔞 NSFW Guard", "red"), callback_data="help_nsfw")
         ],
         [
+            InlineKeyboardButton(colored_button("🏆 Ranking & Levels", "green"), callback_data="help_ranking"),
             InlineKeyboardButton(colored_button("❌ Close", "red"), callback_data="help_close")
         ]
     ]
@@ -224,6 +225,21 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <b>Anti-Duplicate Flood:</b> Auto-mutes users repeating identical messages 3+ times\n"
             "• <b>Anti-Zalgo:</b> Strips/deletes invisible zero-width unicode characters and stacked diacritics\n"
             "• <b>Stealth Link Filter:</b> Catches masked markdown hyperlinks and raw invite URLs"
+        )
+    elif data == "help_ranking":
+        help_text = (
+            "🏆 <b>Chat Ranking, Scores &amp; Level-Up Progression</b>\n\n"
+            "Tracks active chatters, awards Chat Score (XP), levels up members with rank titles, and posts automated daily Top 10 leaderboards directly in group.\n\n"
+            "<b>User Commands:</b>\n"
+            "• <code>/ranking</code>, <code>/leaderboard</code>, <code>/top</code> - Open the interactive group leaderboard with 📅 Daily, 📆 Weekly, and 🏆 Overall buttons\n"
+            "• <code>/myrank</code>, <code>/rank</code>, <code>/score</code>, <code>/level</code> - View your current rank, level, XP, message breakdown, and level-up progress bar\n\n"
+            "<b>Admin Commands:</b>\n"
+            "• <code>/posttop</code> or <code>/dailytop</code> - Manually trigger and broadcast the Daily Top 10 Leaderboard in the group immediately\n"
+            "• <code>/rankingsettings</code> - Open the ranking control panel to toggle tracking, daily auto-posts, and level-up alerts\n\n"
+            "<b>Features:</b>\n"
+            "• <b>Level-Up Celebrations:</b> In-group promotion announcements when members advance in rank\n"
+            "• <b>Automated Daily Top 10:</b> Scheduled broadcast of the day's top 10 chatters at midnight UTC\n"
+            "• <b>Multi-Timeframe:</b> Seamlessly toggle between Today, This Week, and All-Time leaderboards"
         )
     elif data == "help_nsfw":
         help_text = (

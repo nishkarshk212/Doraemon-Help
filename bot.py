@@ -44,6 +44,7 @@ from features.multitask import get_multitask_handlers
 from features.nsfw_panel import get_nsfw_handlers
 from features.high_protection import get_high_protection_handlers, clean_protection_trackers_job
 from features.protection_panel import get_protection_panel_handlers
+from features.ranking import get_ranking_handlers, check_daily_leaderboard_job
 from features.doraemon_ai import get_doraemon_ai_handlers
 from core.config import BOT_TOKEN, LOG_CHANNEL_ID, OWNER_ID, log_to_channel, send_bot_response, send_bot_media, START_IMG, to_small_caps, colored_button
 from features.voice_chat import start_voice_chat_monitor, stop_voice_chat_monitor, get_voice_chat_handlers
@@ -1537,9 +1538,18 @@ def main():
     for handler in get_protection_panel_handlers():
         application.add_handler(handler)
 
+    # Add Ranking, Level-Up Progression & Leaderboard handlers (Group 0 for commands/callbacks, Group 19 for activity monitor)
+    for handler in get_ranking_handlers():
+        if isinstance(handler, MessageHandler) and not isinstance(handler, CommandHandler):
+            application.add_handler(handler, group=19)
+        else:
+            application.add_handler(handler)
+
     # Tracker memory hygiene job
     if application.job_queue:
         application.job_queue.run_repeating(clean_protection_trackers_job, interval=60, first=30)
+        # Check and post Daily Top 10 Leaderboards
+        application.job_queue.run_repeating(check_daily_leaderboard_job, interval=600, first=60)
 
     # Add Join Request handlers
     for handler in get_join_request_handlers():
@@ -1627,6 +1637,9 @@ def main():
             BotCommand("protection", "Interactive High Protection Settings Panel (Admins only)"),
             BotCommand("antiraid", "Toggle Anti-Raid velocity join shield (Admins only)"),
             BotCommand("antichannel", "Toggle Anti-Channel sender blocker (Admins only)"),
+            BotCommand("ranking", "Group chat leaderboard (Daily/Weekly/Overall)"),
+            BotCommand("myrank", "Your chat score, level & rank progress"),
+            BotCommand("posttop", "Send Daily Top 10 leaderboard to group (Admins only)"),
         ]
         try:
             await application.bot.set_my_commands(commands)

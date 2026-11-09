@@ -228,3 +228,4 @@ def get_protection_panel_handlers():
         CommandHandler(["protection", "security"], protection_command),
         CallbackQueryHandler(handle_protection_callback, pattern=r"^prot_"),
     ]
+
