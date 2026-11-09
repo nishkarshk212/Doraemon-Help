@@ -185,8 +185,60 @@ async def get_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     return None, None
 
+# In-memory admin status cache with TTL for massive speedup
+# key: (chat_id, user_id) -> value: {"is_admin": bool, "status": str, "can_change_info": bool, "can_restrict": bool, "can_promote": bool, "time": float}
+ADMIN_CACHE = {}
+ADMIN_CACHE_TTL = 180.0  # 3 minutes
+
+def clear_admin_cache(chat_id=None, user_id=None):
+    """Invalidate cached admin permissions for a chat, user, or all."""
+    global ADMIN_CACHE
+    if chat_id is None and user_id is None:
+        ADMIN_CACHE.clear()
+    elif user_id is None:
+        chat_id_int = int(chat_id) if chat_id else 0
+        ADMIN_CACHE = {k: v for k, v in ADMIN_CACHE.items() if k[0] != chat_id_int}
+    else:
+        ADMIN_CACHE.pop((int(chat_id), int(user_id)), None)
+
+async def _get_cached_member_info(chat_id, user_id, context):
+    """Retrieve chat member info with in-memory TTL caching."""
+    import time
+    if not user_id or not chat_id:
+        return None
+    
+    chat_key = int(chat_id)
+    user_key = int(user_id)
+    now = time.time()
+    
+    cached = ADMIN_CACHE.get((chat_key, user_key))
+    if cached and (now - cached["time"] < ADMIN_CACHE_TTL):
+        return cached
+
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        status = member.status
+        is_creator = status == 'creator'
+        is_admin = status in ['administrator', 'creator']
+        can_change_info = is_creator or getattr(member, 'can_change_info', False)
+        can_restrict = is_creator or getattr(member, 'can_restrict_members', False)
+        can_promote = is_creator or getattr(member, 'can_promote_members', False)
+        
+        info = {
+            "is_admin": is_admin,
+            "status": status,
+            "can_change_info": can_change_info,
+            "can_restrict": can_restrict,
+            "can_promote": can_promote,
+            "time": now
+        }
+        ADMIN_CACHE[(chat_key, user_key)] = info
+        return info
+    except Exception:
+        return None
+
 async def is_user_admin(chat_id, user_id, context):
-    """Check if the user is an admin or owner."""
+    """Check if the user is an admin or owner (ultra-fast cached)."""
     if not user_id: return False
     
     # Telegram's ID for anonymous admins (Group Anonymous Bot)
@@ -196,55 +248,49 @@ async def is_user_admin(chat_id, user_id, context):
         
     if user_id == OWNER_ID:
         return True
-    try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        return member.status in ['administrator', 'creator']
-    except:
-        return False
+    
+    info = await _get_cached_member_info(chat_id, user_id, context)
+    return info["is_admin"] if info else False
 
 async def can_user_configure_settings(chat_id, user_id, context):
     """Check if a user can configure settings (Owner, Creator, or Admin with Change Info + Ban perms)."""
     if not user_id: return False
     
-    # Anonymous admins are allowed to configure settings as we can't check specific rights easily
     ANONYMOUS_ADMIN_ID = 1087968824
     if user_id == ANONYMOUS_ADMIN_ID:
         return True
         
     if user_id == OWNER_ID:
         return True
-    try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        if member.status == 'creator':
-            return True
-        if member.status == 'administrator':
-            # Check for both "Change Group Info" and "Ban Users" (can_restrict_members)
-            return member.can_change_info and member.can_restrict_members
+    
+    info = await _get_cached_member_info(chat_id, user_id, context)
+    if not info:
         return False
-    except:
-        return False
+    if info["status"] == 'creator':
+        return True
+    if info["is_admin"]:
+        return info["can_change_info"] and info["can_restrict"]
+    return False
 
 async def can_user_reload(chat_id, user_id, context):
     """Check if a user can reload (Owner, Creator, or Admin with Change Info + Ban + Add Admin perms)."""
     if not user_id: return False
     
-    # Anonymous admins are allowed to reload as we can't check specific rights easily
     ANONYMOUS_ADMIN_ID = 1087968824
     if user_id == ANONYMOUS_ADMIN_ID:
         return True
         
     if user_id == OWNER_ID:
         return True
-    try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        if member.status == 'creator':
-            return True
-        if member.status == 'administrator':
-            # Check for "Change Group Info", "Ban Users" (can_restrict_members), and "Add New Admins" (can_promote_members)
-            return member.can_change_info and member.can_restrict_members and member.can_promote_members
+    
+    info = await _get_cached_member_info(chat_id, user_id, context)
+    if not info:
         return False
-    except:
-        return False
+    if info["status"] == 'creator':
+        return True
+    if info["is_admin"]:
+        return info["can_change_info"] and info["can_restrict"] and info["can_promote"]
+    return False
 
 async def cache_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """MessageHandler to cache user data and detect name changes."""

@@ -42,6 +42,8 @@ from managers import get_manager_handlers
 from features.tagger import get_tagger_handlers
 from features.multitask import get_multitask_handlers
 from features.nsfw_panel import get_nsfw_handlers
+from features.high_protection import get_high_protection_handlers, _clean_trackers
+from features.protection_panel import get_protection_panel_handlers
 from features.doraemon_ai import get_doraemon_ai_handlers
 from core.config import BOT_TOKEN, LOG_CHANNEL_ID, OWNER_ID, log_to_channel, send_bot_response, send_bot_media, START_IMG, to_small_caps, colored_button
 from features.voice_chat import start_voice_chat_monitor, stop_voice_chat_monitor, get_voice_chat_handlers
@@ -1524,6 +1526,21 @@ def main():
     for handler in get_nsfw_handlers():
         application.add_handler(handler)
 
+    # Add High Protection & Security Suite (Group 0 for commands, Group 18 for monitors)
+    for handler in get_high_protection_handlers():
+        if isinstance(handler, CommandHandler):
+            application.add_handler(handler)
+        else:
+            application.add_handler(handler, group=18)
+
+    # Add Protection Panel handlers (Group 0)
+    for handler in get_protection_panel_handlers():
+        application.add_handler(handler)
+
+    # Tracker memory hygiene job
+    if application.job_queue:
+        application.job_queue.run_repeating(lambda ctx: _clean_trackers(), interval=60, first=30)
+
     # Add Join Request handlers
     for handler in get_join_request_handlers():
         application.add_handler(handler)
@@ -1606,6 +1623,10 @@ def main():
             BotCommand("captcha", "Captcha verification settings (Admins only)"),
             BotCommand("premiumboost", "Manage premium user boost requirements (Admins only)"),
             BotCommand("doraemon", "Chat with Doraemon AI Assistant"),
+            BotCommand("shield", "1-Click Master Shield & Lockdown Mode (Admins only)"),
+            BotCommand("protection", "Interactive High Protection Settings Panel (Admins only)"),
+            BotCommand("antiraid", "Toggle Anti-Raid velocity join shield (Admins only)"),
+            BotCommand("antichannel", "Toggle Anti-Channel sender blocker (Admins only)"),
         ]
         try:
             await application.bot.set_my_commands(commands)

@@ -239,7 +239,24 @@ DEFAULT_CHAT_SETTINGS = {
     "blocking_delete_notifications": True,
     "blocking_notification_timer": 30,
     "blocking_custom_text": None,
-    "ui_layout_type": 1 # 1 (Default/Large), 2 (Small/Compact)
+    "ui_layout_type": 1, # 1 (Default/Large), 2 (Small/Compact)
+    # High Protection & Shield Suite settings
+    "shield_mode_enabled": False,
+    "shield_backup_settings": None,
+    "anti_raid_enabled": True,
+    "anti_raid_threshold": 5,
+    "anti_raid_window": 10,
+    "anti_raid_action": "mute", # mute, kick, ban
+    "anti_raid_mute_time": 900, # 15 minutes
+    "anti_channel_enabled": False,
+    "anti_channel_action": "delete_ban", # delete, delete_ban
+    "mention_spam_enabled": True,
+    "mention_spam_limit": 5,
+    "mention_spam_action": "delete_warn", # delete, delete_warn, delete_mute
+    "duplicate_spam_enabled": True,
+    "duplicate_spam_limit": 3,
+    "duplicate_spam_window": 10,
+    "anti_zalgo_enabled": True
 }
 
 def get_chat_settings(chat_id):

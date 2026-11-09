@@ -73,10 +73,18 @@ async def check_link_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Apply on EVERYONE including owner
         pass
     
-    # Check if message contains a link
+    # Check if message contains a link (text regex + entities check for stealth hyperlinks)
     message_text = update.message.text or update.message.caption or ""
+    has_link = contains_link(message_text)
     
-    if contains_link(message_text):
+    if not has_link:
+        entities = (update.message.entities or ()) + (update.message.caption_entities or ())
+        for ent in entities:
+            if ent.type in ("url", "text_link"):
+                has_link = True
+                break
+
+    if has_link:
         logging.info(f"[LINK_SPAM] Link detected in chat {chat_id} from user {user_id}. apply_on={apply_on}, is_admin={is_admin}")
         try:
             # Delete the message with link

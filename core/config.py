@@ -13,13 +13,28 @@ OWNER_ID = int(os.getenv("OWNER_ID", 8519966775))
 START_IMG = os.getenv("START_IMG", "https://i.ibb.co/xSd6kWdj/Group-Help-Bot-Shield-Branding.png").split()
 
 async def log_to_channel(context, message):
-    """Logs a message to the specified log channel."""
-    if LOG_CHANNEL_ID:
+    """Logs a message to the specified log channel (non-blocking async dispatch)."""
+    if not LOG_CHANNEL_ID:
+        return
+
+    async def _dispatch_log():
         try:
-            # We don't apply small caps for logs for better readability
             await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=f"🔔 #LOG\n\n{message}")
         except Exception as e:
             logging.error(f"Failed to log to channel: {e}")
+
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(_dispatch_log())
+        else:
+            await _dispatch_log()
+    except Exception:
+        try:
+            await _dispatch_log()
+        except Exception:
+            pass
 
 async def delete_admin_command(update, context):
     """Helper function to delete an admin's command message."""

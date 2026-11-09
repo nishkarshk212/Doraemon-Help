@@ -33,6 +33,11 @@ def update_admin_cache(chat_id, user_id, permissions, merge=True):
             final_perms = clean_new
 
         ADMIN_CACHE[(chat_id, user_id)] = final_perms
+        try:
+            from managers.user_manager_mongo import clear_admin_cache
+            clear_admin_cache(chat_id, user_id)
+        except Exception:
+            pass
         
         admins_col = get_collection(COLLECTIONS["admins"])
         if admins_col is None:
@@ -148,6 +153,11 @@ def remove_admin_cache(chat_id, user_id):
         # Remove from cache
         if (chat_id, user_id) in ADMIN_CACHE:
             del ADMIN_CACHE[(chat_id, user_id)]
+        try:
+            from managers.user_manager_mongo import clear_admin_cache
+            clear_admin_cache(chat_id, user_id)
+        except Exception:
+            pass
             
         admins_col = get_collection(COLLECTIONS["admins"])
         if admins_col is None:

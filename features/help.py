@@ -45,14 +45,17 @@ def get_help_keyboard():
         ],
         [
             InlineKeyboardButton(colored_button("🤖 Bot Protect", "blue"), callback_data="help_bot_prot"),
-            InlineKeyboardButton(colored_button("🧠 AI Chat", "green"), callback_data="help_ai")
+            InlineKeyboardButton(colored_button("🛡️ Shield & Security", "red"), callback_data="help_security")
         ],
         [
-            InlineKeyboardButton(colored_button("🌐 Translator", "default"), callback_data="help_tr"),
-            InlineKeyboardButton(colored_button("⚡ Multi-Task", "blue"), callback_data="help_multitask")
+            InlineKeyboardButton(colored_button("🧠 AI Chat", "green"), callback_data="help_ai"),
+            InlineKeyboardButton(colored_button("🌐 Translator", "default"), callback_data="help_tr")
         ],
         [
-            InlineKeyboardButton(colored_button("🔞 NSFW Guard", "red"), callback_data="help_nsfw"),
+            InlineKeyboardButton(colored_button("⚡ Multi-Task", "blue"), callback_data="help_multitask"),
+            InlineKeyboardButton(colored_button("🔞 NSFW Guard", "red"), callback_data="help_nsfw")
+        ],
+        [
             InlineKeyboardButton(colored_button("❌ Close", "red"), callback_data="help_close")
         ]
     ]
@@ -206,6 +209,21 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• /login &lt;session&gt; - Link your user string session (in PM)\n"
             "• /myaccount - Check your account connection status\n"
             "• /logout - Unlink your session safely"
+        )
+    elif data == "help_security":
+        help_text = (
+            "🛡️ <b>High Protection & Shield Suite</b>\n\n"
+            "Enterprise-grade defense against raids, spam bots, channel spam, and flooding.\n\n"
+            "<b>Commands:</b>\n"
+            "• <code>/shield [on|off]</code> (or <code>/lockdown</code>) - 1-Click Master Shield lockdown (engages Anti-Raid, Anti-Channel, Bot Protection, Link Protection, Strict Flood, NSFW Filter)\n"
+            "• <code>/protection</code> (or <code>/security</code>) - Open the interactive Protection Settings Panel\n"
+            "• <code>/antiraid [on|off]</code> - Velocity-based mass-join detection (auto-mutes raiders if 5+ join in 10s)\n"
+            "• <code>/antichannel [on|off]</code> - Block and auto-ban external channels sending messages\n"
+            "• <code>/antimention [on|off]</code> - Prevent mass tag / mention raids\n\n"
+            "<b>Built-in Protections:</b>\n"
+            "• <b>Anti-Duplicate Flood:</b> Auto-mutes users repeating identical messages 3+ times\n"
+            "• <b>Anti-Zalgo:</b> Strips/deletes invisible zero-width unicode characters and stacked diacritics\n"
+            "• <b>Stealth Link Filter:</b> Catches masked markdown hyperlinks and raw invite URLs"
         )
     elif data == "help_nsfw":
         help_text = (

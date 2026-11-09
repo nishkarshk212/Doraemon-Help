@@ -271,8 +271,9 @@ def get_main_settings_keyboard(chat_id):
              InlineKeyboardButton(colored_button("👥 Mgr", "blue"), callback_data="set_view_manager")],
             [InlineKeyboardButton(colored_button("🚨 Emergency", "blue"), callback_data="set_view_emergency"),
              InlineKeyboardButton(colored_button("🛡️ Captcha", "blue"), callback_data="set_view_captcha")],
-            [InlineKeyboardButton(colored_button("🔞 NSFW", "blue"), callback_data="set_view_nsfw"),
-             InlineKeyboardButton(colored_button("📋 Freed", "blue"), callback_data="free_list_members")],
+            [InlineKeyboardButton(colored_button("🛡️ Protect", "blue"), callback_data="set_view_protection"),
+             InlineKeyboardButton(colored_button("🔞 NSFW", "blue"), callback_data="set_view_nsfw")],
+            [InlineKeyboardButton(colored_button("📋 Freed", "blue"), callback_data="free_list_members")],
             [InlineKeyboardButton(colored_button("🎨 Layout: Small", "blue"), callback_data="set_toggle_ui_layout")],
             [InlineKeyboardButton(colored_button("❌ Close", "blue"), callback_data="set_close")]
         ]
@@ -302,6 +303,7 @@ def get_main_settings_keyboard(chat_id):
              InlineKeyboardButton(colored_button("👥 Manager", "blue"), callback_data="set_view_manager")],
             [InlineKeyboardButton(colored_button("🚨 Emergency", "blue"), callback_data="set_view_emergency"),
              InlineKeyboardButton(colored_button("🛡️ Captcha", "blue"), callback_data="set_view_captcha")],
+            [InlineKeyboardButton(colored_button("🛡️ High Protection & Shield", "blue"), callback_data="set_view_protection")],
             [InlineKeyboardButton(colored_button("🔞 NSFW Filter", "blue"), callback_data="set_view_nsfw")],
             [InlineKeyboardButton(colored_button("📋 Freed Members", "blue"), callback_data="free_list_members")],
             [InlineKeyboardButton(colored_button("🎨 Layout: Large", "blue"), callback_data="set_toggle_ui_layout")],
@@ -2322,6 +2324,26 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except BadRequest: pass
         await query.answer()
         return
+
+    if data == "set_view_protection" or data.startswith("prot_"):
+        from features.protection_panel import handle_protection_callback, get_protection_panel_keyboard, render_protection_panel_text
+        if data == "set_view_protection":
+            settings = get_chat_settings(chat_id)
+            title = update.effective_chat.title or "This Chat"
+            text = render_protection_panel_text(title, settings)
+            try:
+                await edit_bot_response(
+                    query, context,
+                    text,
+                    reply_markup=get_protection_panel_keyboard(chat_id, settings),
+                    parse_mode='HTML'
+                )
+            except BadRequest: pass
+            await query.answer()
+            return
+        else:
+            await handle_protection_callback(update, context)
+            return
 
     if data == "set_view_nsfw" or data.startswith("nsfw_"):
         from features.nsfw_panel import handle_nsfw_callback, get_nsfw_panel_keyboard, render_nsfw_panel_text
