@@ -33,7 +33,21 @@ def extract_text_from_image_bytes(image_bytes: bytes) -> Optional[str]:
 
     if _RAPIDOCR_AVAILABLE and _ocr_engine is not None:
         try:
-            result, _ = _ocr_engine(image_bytes)
+            payload = image_bytes
+            try:
+                from PIL import Image
+                im = Image.open(io.BytesIO(image_bytes))
+                if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info) or im.format == "WEBP":
+                    rgba = im.convert("RGBA")
+                    bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                    rgb_img = Image.alpha_composite(bg, rgba).convert("RGB")
+                    buf = io.BytesIO()
+                    rgb_img.save(buf, format="PNG")
+                    payload = buf.getvalue()
+            except Exception:
+                pass
+
+            result, _ = _ocr_engine(payload)
             if result:
                 lines = [item[1] for item in result if len(item) > 1 and item[1]]
                 text = " ".join(lines).strip()

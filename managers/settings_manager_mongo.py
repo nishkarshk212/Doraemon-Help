@@ -59,8 +59,19 @@ DEFAULT_CHAT_SETTINGS = {
     "allowed_languages": ["en", "hi", "hinglish"],
     # NSFW filter settings
     "nsfw_filter_enabled": False,
-    "nsfw_action": "delete", # delete, warn, mute, ban, kick
-    "nsfw_threshold": 0.7,   # Relevance threshold for NSFW match
+    "nsfw_action": "delete", # delete, warn, mute, ban, kick, log_only
+    "nsfw_threshold": 0.65,  # Relevance threshold for NSFW match
+    "nsfw_exempt_admins": False,
+    "nsfw_whitelist": [],
+    "nsfw_categories": {
+        "sexual_nsfw": True,
+        "violence_gore": True,
+        "weapons": True,
+        "drugs_alcohol": True,
+        "self_harm": True,
+        "hate_extremism": True,
+        "harassment_abuse": True,
+    },
     # Emoji and special character blocking
     "emoji_block_enabled": False,
     "block_emoji_only": True,

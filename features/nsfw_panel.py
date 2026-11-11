@@ -13,10 +13,11 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPer
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode, ChatType
 
-from core.config import send_bot_response, edit_bot_response, colored_button, OWNER_ID
+from core.config import send_bot_response, edit_bot_response, colored_button, OWNER_ID, log_to_channel
 from core.database import get_collection
 from managers.settings_manager_mongo import get_chat_settings, update_chat_setting
 from managers.user_manager_mongo import is_user_admin
+from managers.moderation_manager_mongo import add_warn
 
 # Import engine orchestrator
 from moderation.nsfw_engine.pipeline import analyze_text_content, analyze_media_bytes
@@ -63,7 +64,9 @@ def get_nsfw_panel_keyboard(chat_id: int, settings: dict) -> InlineKeyboardMarku
     enabled = settings.get("nsfw_filter_enabled", False)
     status_str = "🟢 Enabled" if enabled else "🔴 Disabled"
     action = settings.get("nsfw_action", "delete").upper()
-    threshold = settings.get("nsfw_threshold", 0.65)
+    threshold = float(settings.get("nsfw_threshold", 0.65))
+    exempt_admins = settings.get("nsfw_exempt_admins", False)
+    exempt_str = "🟢 ON" if exempt_admins else "🔴 OFF"
 
     keyboard = [
         [
@@ -81,6 +84,7 @@ def get_nsfw_panel_keyboard(chat_id: int, settings: dict) -> InlineKeyboardMarku
             InlineKeyboardButton(colored_button("📊 Moderation Stats", "blue"), callback_data=f"nsfw_view_stats:{chat_id}"),
         ],
         [
+            InlineKeyboardButton(colored_button(f"👮 Exempt Admins: {exempt_str}", "green" if exempt_admins else "default"), callback_data=f"nsfw_toggle_exempt_admins:{chat_id}"),
             InlineKeyboardButton(colored_button("🛡️ Whitelisted Users", "blue"), callback_data=f"nsfw_view_whitelist:{chat_id}"),
         ],
         [
@@ -161,6 +165,8 @@ def render_nsfw_panel_text(chat_title: str, settings: dict) -> str:
     status_icon = "🟢 <b>ACTIVE</b>" if enabled else "🔴 <b>DISABLED</b>"
     action = settings.get("nsfw_action", "delete").upper()
     threshold = float(settings.get("nsfw_threshold", 0.65))
+    exempt_admins = settings.get("nsfw_exempt_admins", False)
+    exempt_icon = "🟢 <b>YES</b>" if exempt_admins else "🔴 <b>NO</b>"
     cats = settings.get("nsfw_categories", {})
 
     active_cats = [cat_name for cat_id, cat_name in ALL_CATEGORIES if cats.get(cat_id, True)]
@@ -172,8 +178,9 @@ def render_nsfw_panel_text(chat_title: str, settings: dict) -> str:
         f"• <b>Status:</b> {status_icon}\n"
         f"• <b>Enforcement Action:</b> <code>{action}</code>\n"
         f"• <b>Sensitivity Threshold:</b> <code>{threshold:.0%}</code>\n"
+        f"• <b>Exempt Admins:</b> {exempt_icon}\n"
         f"• <b>Active Protection Categories:</b> <b>{active_count}/7</b>\n\n"
-        f"💡 <i>Multi-stage vision (skin tone, anatomy, models), regex text lexicon, and SHA-256 deduplication.</i>"
+        f"💡 <i>Multi-stage vision (NudeNet, MobileNetV2, skin tone), RapidOCR, video/GIF frame sampling & sticker support.</i>"
     )
 
 
@@ -186,7 +193,11 @@ async def handle_nsfw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     parts = data.split(":")
     action_type = parts[0]
 
-    chat_id = int(parts[1]) if len(parts) > 1 and parts[1].lstrip("-").isdigit() else update.effective_chat.id
+    # Resolve target chat_id safely even when configured via private settings panel
+    if len(parts) > 1 and parts[-1].lstrip("-").isdigit():
+        chat_id = int(parts[-1])
+    else:
+        chat_id = update.effective_chat.id
     user_id = query.from_user.id
 
     # Admin check
@@ -211,6 +222,16 @@ async def handle_nsfw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         text = render_nsfw_panel_text(chat_title, new_settings)
         await edit_bot_response(query, context, text, reply_markup=get_nsfw_panel_keyboard(chat_id, new_settings), parse_mode=ParseMode.HTML)
         await query.answer(f"NSFW Safeguard {'Enabled' if new_state else 'Disabled'}")
+
+    # 2b. Toggle Admin Exemption
+    elif action_type == "nsfw_toggle_exempt_admins":
+        current = settings.get("nsfw_exempt_admins", False)
+        new_state = not current
+        update_chat_setting(chat_id, "nsfw_exempt_admins", new_state)
+        new_settings = get_chat_settings(chat_id)
+        text = render_nsfw_panel_text(chat_title, new_settings)
+        await edit_bot_response(query, context, text, reply_markup=get_nsfw_panel_keyboard(chat_id, new_settings), parse_mode=ParseMode.HTML)
+        await query.answer(f"Exempt Admins: {'ON' if new_state else 'OFF'}")
 
     # 3. View Categories
     elif action_type == "nsfw_view_categories":
@@ -361,6 +382,148 @@ async def nsfw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+MAX_BOT_API_FILE_BYTES = 19_500_000  # Telegram Bot API get_file hard cap is 20MB
+
+
+async def _download_file_bytes(context: ContextTypes.DEFAULT_TYPE, file_obj) -> Optional[bytes]:
+    """Safely download a Telegram File / PhotoSize / Sticker within Bot API size caps."""
+    if not file_obj or not getattr(file_obj, "file_id", None):
+        return None
+    fsize = getattr(file_obj, "file_size", 0) or 0
+    if fsize > MAX_BOT_API_FILE_BYTES:
+        logger.info(f"[NSFW] Skipping oversized media download ({fsize} bytes > 19.5MB); falling back to thumbnail.")
+        return None
+    try:
+        bot_file = await context.bot.get_file(file_obj.file_id)
+        data = await bot_file.download_as_bytearray()
+        return bytes(data) if data else None
+    except Exception as exc:
+        logger.debug(f"[NSFW] File download failed ({file_obj.file_id}): {exc}")
+        return None
+
+
+async def _analyze_message_target(
+    target,
+    context: ContextTypes.DEFAULT_TYPE,
+    cats_config: dict,
+    threshold: float,
+) -> Optional[ModerationResult]:
+    """
+    Unified content extraction and NSFW analysis for stickers (static/animated/video),
+    photos, GIFs/animations, videos, video notes, image/video/gif documents, and text.
+    """
+    caption = target.caption or ""
+    text_content = target.text or caption
+
+    # ── 1. Stickers (Static .webp, Animated .tgs, Video .webm) ──────────────
+    if target.sticker:
+        sticker = target.sticker
+        # Match NSFW-Detector: stylized / smaller artwork uses stricter sensitivity cap (0.45)
+        sticker_thresh = min(threshold, 0.45)
+
+        thumb_bytes = None
+        if sticker.thumbnail:
+            thumb_bytes = await _download_file_bytes(context, sticker.thumbnail)
+
+        if sticker.is_animated:
+            # Animated .tgs (Lottie JSON vector) cannot be parsed as pixels -> scan server-rendered thumbnail
+            if thumb_bytes:
+                return await analyze_media_bytes(thumb_bytes, "sticker", cats_config, threshold=sticker_thresh)
+            logger.debug(f"[NSFW] Animated sticker without thumbnail (set={sticker.set_name!r}), skipping pixels.")
+            return None
+
+        if sticker.is_video:
+            # Video .webm sticker: fast-check thumbnail first, then full .webm multi-frame video scan
+            if thumb_bytes:
+                thumb_res = await analyze_media_bytes(thumb_bytes, "sticker", cats_config, threshold=sticker_thresh)
+                if thumb_res.flagged:
+                    return thumb_res
+            video_bytes = await _download_file_bytes(context, sticker)
+            if video_bytes:
+                return await analyze_media_bytes(video_bytes, "video", cats_config, threshold=sticker_thresh)
+            return None
+
+        # Static .webp sticker
+        media_bytes = await _download_file_bytes(context, sticker)
+        if not media_bytes and thumb_bytes:
+            media_bytes = thumb_bytes
+        if media_bytes:
+            return await analyze_media_bytes(media_bytes, "sticker", cats_config, threshold=sticker_thresh)
+        return None
+
+    # ── 2. Photos ───────────────────────────────────────────────────────────
+    if target.photo:
+        photo = max(target.photo, key=lambda p: p.file_size or 0)
+        media_bytes = await _download_file_bytes(context, photo)
+        if media_bytes:
+            return await analyze_media_bytes(media_bytes, "photo", cats_config, threshold=threshold, caption=caption)
+        if caption:
+            return await analyze_text_content(caption, cats_config, threshold=threshold)
+        return None
+
+    # ── 3. Animations / GIFs ────────────────────────────────────────────────
+    if target.animation:
+        anim = target.animation
+        thumb_bytes = await _download_file_bytes(context, anim.thumbnail) if anim.thumbnail else None
+        if thumb_bytes:
+            thumb_res = await analyze_media_bytes(thumb_bytes, "photo", cats_config, threshold=threshold, caption=caption)
+            if thumb_res.flagged:
+                return thumb_res
+
+        media_bytes = await _download_file_bytes(context, anim)
+        if media_bytes:
+            return await analyze_media_bytes(media_bytes, "animation", cats_config, threshold=threshold, caption=caption)
+        if caption:
+            return await analyze_text_content(caption, cats_config, threshold=threshold)
+        return None
+
+    # ── 4. Videos & Video Notes ─────────────────────────────────────────────
+    if target.video or target.video_note:
+        vid_obj = target.video or target.video_note
+        ct = "video" if target.video else "video_note"
+        thumb_bytes = await _download_file_bytes(context, vid_obj.thumbnail) if getattr(vid_obj, "thumbnail", None) else None
+        if thumb_bytes:
+            thumb_res = await analyze_media_bytes(thumb_bytes, "photo", cats_config, threshold=threshold, caption=caption)
+            if thumb_res.flagged:
+                return thumb_res
+
+        media_bytes = await _download_file_bytes(context, vid_obj)
+        if media_bytes:
+            return await analyze_media_bytes(media_bytes, ct, cats_config, threshold=threshold, caption=caption)
+        if caption:
+            return await analyze_text_content(caption, cats_config, threshold=threshold)
+        return None
+
+    # ── 5. Media sent as Document (Images, GIFs, Videos) ────────────────────
+    if target.document:
+        doc = target.document
+        mime = (doc.mime_type or "").lower()
+        fname = (doc.file_name or "").lower()
+        is_gif = mime == "image/gif" or fname.endswith(".gif")
+        is_img = (not is_gif) and (mime.startswith("image/") or fname.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff")))
+        is_vid = mime.startswith("video/") or fname.endswith((".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"))
+
+        if is_gif or is_img or is_vid:
+            ct = "gif" if is_gif else ("photo" if is_img else "video")
+            thumb_bytes = await _download_file_bytes(context, doc.thumbnail) if doc.thumbnail else None
+            if thumb_bytes:
+                thumb_res = await analyze_media_bytes(thumb_bytes, "photo", cats_config, threshold=threshold, caption=caption)
+                if thumb_res.flagged:
+                    return thumb_res
+            media_bytes = await _download_file_bytes(context, doc)
+            if media_bytes:
+                return await analyze_media_bytes(media_bytes, ct, cats_config, threshold=threshold, caption=caption)
+            if caption:
+                return await analyze_text_content(caption, cats_config, threshold=threshold)
+            return None
+
+    # ── 6. Plain Text / Caption ─────────────────────────────────────────────
+    if text_content and text_content.strip():
+        return await analyze_text_content(text_content, cats_config, threshold=threshold)
+
+    return None
+
+
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Deep scan replied content and output detailed scores: /scan"""
     msg = update.effective_message
@@ -369,46 +532,19 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target:
         return await msg.reply_text(
             "🔍 <b>NSFW & Content Deep Scanner</b>\n\n"
-            "Reply to any message (text, photo, sticker, webm, video, GIF, or document) with <code>/scan</code> "
+            "Reply to any message (text, photo, sticker, webm, video, video note, GIF, or document) with <code>/scan</code> "
             "to run multi-model analysis and view confidence scores.",
             parse_mode=ParseMode.HTML
         )
 
     status_msg = await msg.reply_text("🔬 Analyzing content with AI vision & neural lexicons...")
 
-    caption = target.caption or ""
-    text_content = target.text or caption
-    media_bytes = None
-    content_type = "text"
-
     try:
-        if target.photo:
-            content_type = "photo"
-            file = await context.bot.get_file(target.photo[-1].file_id)
-            media_bytes = bytes(await file.download_as_bytearray())
-        elif target.sticker:
-            content_type = "sticker"
-            file = await context.bot.get_file(target.sticker.file_id)
-            media_bytes = bytes(await file.download_as_bytearray())
-        elif target.animation:
-            content_type = "animation"
-            file = await context.bot.get_file(target.animation.file_id)
-            media_bytes = bytes(await file.download_as_bytearray())
-        elif target.video:
-            content_type = "video"
-            file = await context.bot.get_file(target.video.file_id)
-            media_bytes = bytes(await file.download_as_bytearray())
-        elif target.document:
-            content_type = "document"
-            file = await context.bot.get_file(target.document.file_id)
-            media_bytes = bytes(await file.download_as_bytearray())
-
-        # Analyze
         cats_map = {c[0]: True for c in ALL_CATEGORIES}
-        if media_bytes:
-            result = await analyze_media_bytes(media_bytes, content_type, cats_map, threshold=0.50, caption=caption)
-        else:
-            result = await analyze_text_content(text_content, cats_map, threshold=0.50)
+        result = await _analyze_message_target(target, context, cats_map, threshold=0.50)
+
+        if result is None:
+            return await status_msg.edit_text("ℹ️ No scannable text, image, sticker, GIF, or video found in the replied message.")
 
         # Build visual score report
         status_banner = "🔴 <b>FLAGGED (PROHIBITED)</b>" if result.flagged else "🟢 <b>CLEAN (SAFE)</b>"
@@ -429,7 +565,8 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bar = "█" * bar_len + "░" * (10 - bar_len)
             icon = "⚠️" if cat.triggered else "▫️"
             c_name = cat.category.replace('_', ' ').title()
-            lines.append(f"{icon} <b>{c_name}:</b> {bar} <code>{pct:.1f}%</code>")
+            detail = f" — <i>{html.escape(cat.reason)}</i>" if cat.reason else ""
+            lines.append(f"{icon} <b>{c_name}:</b> {bar} <code>{pct:.1f}%</code>{detail}")
 
         await status_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
@@ -517,6 +654,21 @@ async def whitelisted_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ─── Message Moderation Pipeline Hook ───────────────────────────────────────
 
+def _record_nsfw_stats_sync(chat_id: int, flagged: bool, triggered_cats: dict):
+    try:
+        stats_col = get_nsfw_stats_col()
+        if stats_col is not None:
+            inc_dict = {"total_analyzed": 1}
+            if flagged:
+                inc_dict["total_flagged"] = 1
+                inc_dict["total_deleted"] = 1
+                for cat_k in triggered_cats:
+                    inc_dict[f"categories.{cat_k}"] = 1
+            stats_col.update_one({"chat_id": chat_id}, {"$inc": inc_dict}, upsert=True)
+    except Exception as e:
+        logger.debug(f"[NSFW] Stats update failed: {e}")
+
+
 async def process_nsfw_moderation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     Evaluates every incoming message against the NSFW engine.
@@ -534,71 +686,28 @@ async def process_nsfw_moderation(update: Update, context: ContextTypes.DEFAULT_
         return False
 
     user_id = user.id if user else 0
+    is_privileged = bool(user_id == OWNER_ID or (user_id and await is_user_admin(chat.id, user_id, context)))
 
-    # Admins and Whitelisted users are exempt
-    if user_id == OWNER_ID or await is_user_admin(chat.id, user_id, context):
+    # Exempt admins only when admin exemption is explicitly enabled
+    if is_privileged and settings.get("nsfw_exempt_admins", False):
         return False
 
     whitelist = settings.get("nsfw_whitelist", [])
-    if user_id in whitelist:
+    if user_id and user_id in whitelist:
         return False
-
-    # Extract content
-    caption = msg.caption or ""
-    text_content = msg.text or caption
-    media_bytes = None
-    content_type = "text"
-    file_to_download = None
-
-    if msg.photo:
-        content_type = "photo"
-        file_to_download = msg.photo[-1]
-    elif msg.sticker:
-        content_type = "sticker"
-        file_to_download = msg.sticker
-    elif msg.animation:
-        content_type = "animation"
-        file_to_download = msg.animation
-    elif msg.video:
-        content_type = "video"
-        file_to_download = msg.video
-    elif msg.document:
-        mime = msg.document.mime_type or ""
-        fname = msg.document.file_name or ""
-        if mime.startswith("image/") or fname.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-            content_type = "photo"
-            file_to_download = msg.document
-        elif mime.startswith("video/") or fname.lower().endswith((".webm", ".mp4")):
-            content_type = "video"
-            file_to_download = msg.document
 
     cats_config = settings.get("nsfw_categories", {c[0]: True for c in ALL_CATEGORIES})
     threshold = float(settings.get("nsfw_threshold", 0.65))
 
     try:
-        # Download media bytes if needed
-        if file_to_download:
-            bot_file = await context.bot.get_file(file_to_download.file_id)
-            media_bytes = bytes(await bot_file.download_as_bytearray())
-
-        # Analyze
-        if media_bytes:
-            result = await analyze_media_bytes(media_bytes, content_type, cats_config, threshold=threshold, caption=caption)
-        elif text_content:
-            result = await analyze_text_content(text_content, cats_config, threshold=threshold)
-        else:
+        result = await _analyze_message_target(msg, context, cats_config, threshold=threshold)
+        if result is None:
             return False
 
-        # Record stat counters in MongoDB
-        stats_col = get_nsfw_stats_col()
-        if stats_col is not None:
-            inc_dict = {"total_analyzed": 1}
-            if result.flagged:
-                inc_dict["total_flagged"] = 1
-                inc_dict["total_deleted"] = 1
-                for cat_k in result.triggered_categories:
-                    inc_dict[f"categories.{cat_k}"] = 1
-            stats_col.update_one({"chat_id": chat.id}, {"$inc": inc_dict}, upsert=True)
+        # Non-blocking MongoDB stat counters
+        asyncio.create_task(
+            asyncio.to_thread(_record_nsfw_stats_sync, chat.id, result.flagged, result.triggered_categories)
+        )
 
         if not result.flagged:
             return False
@@ -608,13 +717,14 @@ async def process_nsfw_moderation(update: Update, context: ContextTypes.DEFAULT_
         top_category_name = top_cats[0].category.replace('_', ' ').title() if top_cats else "Prohibited Content"
         top_conf = top_cats[0].confidence if top_cats else result.max_confidence
 
-        logger.info(f"[NSFW ENFORCEMENT] Flagged in chat {chat.id} from user {user_id}: {top_category_name} ({top_conf:.0%})")
+        logger.info(f"[NSFW ENFORCEMENT] Flagged {result.content_type} in chat {chat.id} from user {user_id}: {top_category_name} ({top_conf:.0%})")
 
         # Execute penalty action
         action = settings.get("nsfw_action", "delete").lower()
+        effective_action = "delete" if (is_privileged and action in ["warn", "mute", "ban", "kick"]) else action
 
         # Delete message
-        if action in ["delete", "warn", "mute", "ban", "kick"]:
+        if effective_action in ["delete", "warn", "mute", "ban", "kick"]:
             try:
                 await msg.delete()
             except Exception as e:
@@ -627,8 +737,9 @@ async def process_nsfw_moderation(update: Update, context: ContextTypes.DEFAULT_
             f"<blockquote>"
             f"<b><code>[ nsfw detected ]</code></b>\n\n"
             f"<b><code>user: </code></b>{user_mention} [<code>{user_id}</code>]\n"
+            f"<b><code>type: </code></b><b><code>{result.content_type}</code></b>\n"
             f"<b><code>category: </code></b><b><code>{top_category_name.lower()}</code></b> [<code>{top_conf:.0%}</code>]\n"
-            f"<b><code>action: </code></b><b><code>{action.upper()}</code></b>"
+            f"<b><code>action: </code></b><b><code>{effective_action.upper()}</code></b>"
             f"</blockquote>"
         )
 
@@ -643,28 +754,46 @@ async def process_nsfw_moderation(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.warning(f"Could not send NSFW alert message: {e}")
 
-        # Apply member restriction
-        if action == "mute":
-            try:
-                await context.bot.restrict_chat_member(chat.id, user_id, permissions=ChatPermissions(can_send_messages=False))
-            except Exception as e:
-                logger.error(f"Failed to mute user {user_id}: {e}")
-        elif action == "ban":
-            try:
-                await context.bot.ban_chat_member(chat.id, user_id)
-            except Exception as e:
-                logger.error(f"Failed to ban user {user_id}: {e}")
-        elif action == "kick":
-            try:
-                await context.bot.ban_chat_member(chat.id, user_id)
-                await context.bot.unban_chat_member(chat.id, user_id)
-            except Exception as e:
-                logger.error(f"Failed to kick user {user_id}: {e}")
+        # Log to Log Channel (non-blocking)
+        try:
+            await log_to_channel(
+                context,
+                f"🔞 NSFW {result.content_type.upper()} detected in <b>{html.escape(chat.title or str(chat.id))}</b>\n"
+                f"User: {html.escape(user_name)} (<code>{user_id}</code>)\n"
+                f"Category: {top_category_name} ({top_conf:.0%})\n"
+                f"Action: {effective_action.upper()}"
+            )
+        except Exception:
+            pass
+
+        # Apply member restriction (only for non-admins/non-owner)
+        if not is_privileged and user_id:
+            if action == "warn":
+                try:
+                    await asyncio.to_thread(add_warn, chat.id, user_id, f"NSFW ({top_category_name})")
+                except Exception as e:
+                    logger.error(f"Failed to record NSFW warn for {user_id}: {e}")
+            elif action == "mute":
+                try:
+                    await context.bot.restrict_chat_member(chat.id, user_id, permissions=ChatPermissions(can_send_messages=False))
+                except Exception as e:
+                    logger.error(f"Failed to mute user {user_id}: {e}")
+            elif action == "ban":
+                try:
+                    await context.bot.ban_chat_member(chat.id, user_id)
+                except Exception as e:
+                    logger.error(f"Failed to ban user {user_id}: {e}")
+            elif action == "kick":
+                try:
+                    await context.bot.ban_chat_member(chat.id, user_id)
+                    await context.bot.unban_chat_member(chat.id, user_id)
+                except Exception as e:
+                    logger.error(f"Failed to kick user {user_id}: {e}")
 
         return True
 
     except Exception as exc:
-        logger.error(f"Error in NSFW moderation pipeline: {exc}")
+        logger.error(f"Error in NSFW moderation pipeline: {exc}", exc_info=True)
         return False
 
 

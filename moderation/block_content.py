@@ -245,19 +245,20 @@ async def unblock_pack_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def check_blocked_content_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """MessageHandler to check every message for blocked content."""
-    if not update.message or not update.effective_chat:
+    msg = update.effective_message
+    if not msg or not update.effective_chat:
         return
         
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
+    user_id = update.effective_user.id if update.effective_user else 0
     
     # Check if content is blocked
-    is_blocked, reason = is_content_blocked(chat_id, update.message)
+    is_blocked, reason = is_content_blocked(chat_id, msg)
     
     if is_blocked:
         # Respect freed users: if this is a sticker and the user is exempt from
         # sticker blocking, do not delete or penalize them.
-        if update.message.sticker:
+        if msg.sticker:
             settings = get_chat_settings(chat_id)
             user_perms = settings.get("user_permissions", {}).get(str(user_id), {})
             if user_perms.get("block_stickers", False):
@@ -266,12 +267,12 @@ async def check_blocked_content_handler(update: Update, context: ContextTypes.DE
 
         # 1. Always delete the message first
         try:
-            await update.message.delete()
+            await msg.delete()
         except Exception as e:
             logging.error(f"Failed to delete blocked content: {e}")
 
         # 2. Skip penalties for admins and owner
-        if user_id == OWNER_ID or await is_user_admin(chat_id, user_id, context):
+        if user_id == OWNER_ID or (user_id and await is_user_admin(chat_id, user_id, context)):
             logging.info(f"Blocked content deleted from admin/owner {user_id} in {chat_id}. Skipping penalties.")
             return
 
@@ -280,7 +281,7 @@ async def check_blocked_content_handler(update: Update, context: ContextTypes.DE
         limit = settings.get("block_warn_limit", 3)
         penalty = settings.get("block_warn_penalty", "warn") # warn, mute, ban, kick
         
-        user_name = update.effective_user.first_name
+        user_name = update.effective_user.first_name if update.effective_user else "User"
         
         if penalty == "warn":
             from handlers.blocking_handler import send_blocking_notification
@@ -318,17 +319,17 @@ async def check_blocked_content_handler(update: Update, context: ContextTypes.DE
             return
 
     # Check message length (admins/owner are exempt from length limits)
-    if user_id == OWNER_ID or await is_user_admin(chat_id, user_id, context):
+    if user_id == OWNER_ID or (user_id and await is_user_admin(chat_id, user_id, context)):
         return
 
-    msg_content = (update.message.text or "") + (update.message.caption or "")
+    msg_content = (msg.text or "") + (msg.caption or "")
     if msg_content:
         limit = settings.get("msg_length_limit", 0)
         max_l = settings.get("msg_length_max", 0)
         effective_limit = limit if limit > 0 else (max_l if (settings.get("msg_length_delete", False) and max_l > 0) or (max_l > 0 and max_l != 2000) else 0)
         if effective_limit > 0 and len(msg_content) > effective_limit:
             try:
-                await update.message.delete()
+                await msg.delete()
                 from handlers.blocking_handler import send_blocking_notification
                 await send_blocking_notification(
                     update, context, settings,

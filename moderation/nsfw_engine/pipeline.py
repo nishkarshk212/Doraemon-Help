@@ -60,9 +60,12 @@ async def analyze_media_bytes(
 ) -> ModerationResult:
     """Analyze raw media bytes (image, GIF, video, audio, document)."""
     loop = asyncio.get_event_loop()
+    normalized_type = _normalize_content_type(content_type)
 
-    # ── Cache check ──
-    cache_key = _sha256_bytes(media_bytes)
+    # ── Cache check (scoped by hash, type, threshold, enabled categories, caption) ──
+    cat_sig = ",".join(sorted(k for k, v in enabled_categories.items() if v))
+    cap_sig = hashlib.md5(caption.strip().encode("utf-8")).hexdigest()[:8] if caption and caption.strip() else ""
+    cache_key = f"{_sha256_bytes(media_bytes)}:{normalized_type}:{threshold:.2f}:{cat_sig}:{cap_sig}"
     cached = cache.get(cache_key)
     if cached:
         logger.debug(f"Cache hit for media hash {cache_key[:16]}…")
@@ -72,29 +75,74 @@ async def analyze_media_bytes(
     detected_language = "unknown"
     notes = []
 
-    normalized_type = _normalize_content_type(content_type)
+    if settings.TEMP_MEDIA_DIR:
+        os.makedirs(settings.TEMP_MEDIA_DIR, exist_ok=True)
 
-    # ── Image ──────────────────────────────────────────────────────────────
-    if normalized_type in IMAGE_TYPES:
-        # Vision analysis
-        vision_scores = await loop.run_in_executor(
-            None, analyze_image_bytes, media_bytes, enabled_categories, threshold
-        )
-        all_scores.extend(vision_scores)
-        notes.append("vision_analysis")
-
-        # OCR: extract embedded text
-        if settings.OCR_ENABLED:
-            ocr_text = await loop.run_in_executor(
-                None, extract_text_from_image_bytes, media_bytes
+    async def _scan_frames(frame_list: list[bytes], label: str) -> None:
+        nonlocal detected_language
+        notes.append(f"{label}:{len(frame_list)}")
+        for fb in frame_list:
+            vision_scores = await loop.run_in_executor(
+                None, analyze_image_bytes, fb, enabled_categories, threshold
             )
-            if ocr_text:
-                notes.append(f"ocr_extracted:{len(ocr_text)}chars")
-                text_scores, lang = await loop.run_in_executor(
-                    None, analyze_text, ocr_text, enabled_categories, threshold
+            _merge_scores(all_scores, vision_scores)
+            # Early break if high-confidence violation found across frames
+            if any(s.triggered and s.confidence >= 0.88 for s in all_scores):
+                break
+
+        # Run OCR on representative frames (first & middle) if nothing triggered yet
+        if settings.OCR_ENABLED and frame_list and not any(s.triggered for s in all_scores):
+            sample_ocr = [frame_list[0]]
+            if len(frame_list) > 2:
+                sample_ocr.append(frame_list[len(frame_list) // 2])
+            for ocr_fb in sample_ocr:
+                ocr_text = await loop.run_in_executor(
+                    None, extract_text_from_image_bytes, ocr_fb
                 )
-                detected_language = lang
-                _merge_scores(all_scores, text_scores)
+                if ocr_text:
+                    notes.append(f"ocr_extracted:{len(ocr_text)}chars")
+                    text_scores, lang = await loop.run_in_executor(
+                        None, analyze_text, ocr_text, enabled_categories, threshold
+                    )
+                    if detected_language == "unknown":
+                        detected_language = lang
+                    _merge_scores(all_scores, text_scores)
+
+    # ── Image / Sticker ────────────────────────────────────────────────────
+    if normalized_type in IMAGE_TYPES:
+        # Check if animated WebP sticker/image (RIFF....ANIM)
+        is_anim_webp = (
+            len(media_bytes) > 64
+            and media_bytes[:4] == b"RIFF"
+            and b"WEBP" in media_bytes[:20]
+            and b"ANIM" in media_bytes[:80]
+        )
+        if is_anim_webp:
+            frame_bytes_list = await loop.run_in_executor(
+                None, sample_gif_frames, media_bytes, settings.MEDIA_FRAME_SAMPLE_COUNT
+            )
+            if frame_bytes_list:
+                await _scan_frames(frame_bytes_list, "anim_webp_frames")
+        else:
+            # Static photo or sticker vision analysis
+            vision_scores = await loop.run_in_executor(
+                None, analyze_image_bytes, media_bytes, enabled_categories, threshold
+            )
+            all_scores.extend(vision_scores)
+            notes.append("vision_analysis")
+
+            # OCR: extract embedded text
+            if settings.OCR_ENABLED:
+                ocr_text = await loop.run_in_executor(
+                    None, extract_text_from_image_bytes, media_bytes
+                )
+                if ocr_text:
+                    notes.append(f"ocr_extracted:{len(ocr_text)}chars")
+                    text_scores, lang = await loop.run_in_executor(
+                        None, analyze_text, ocr_text, enabled_categories, threshold
+                    )
+                    detected_language = lang
+                    _merge_scores(all_scores, text_scores)
 
     # ── GIF / Animation ────────────────────────────────────────────────────
     elif normalized_type in {"animation", "gif"}:
@@ -102,12 +150,7 @@ async def analyze_media_bytes(
             frame_bytes_list = await loop.run_in_executor(
                 None, sample_gif_frames, media_bytes, settings.MEDIA_FRAME_SAMPLE_COUNT
             )
-            notes.append(f"gif_frames:{len(frame_bytes_list)}")
-            for fb in frame_bytes_list:
-                vision_scores = await loop.run_in_executor(
-                    None, analyze_image_bytes, fb, enabled_categories, threshold
-                )
-                _merge_scores(all_scores, vision_scores)
+            await _scan_frames(frame_bytes_list, "gif_frames")
         else:
             # Telegram animation (MP4 or WEBM)
             suffix = ".webm" if media_bytes.startswith(b"\x1a\x45\xdf\xa3") else ".mp4"
@@ -120,12 +163,7 @@ async def analyze_media_bytes(
                 frame_bytes_list = await loop.run_in_executor(
                     None, sample_video_frames, tmp_path, settings.MEDIA_FRAME_SAMPLE_COUNT
                 )
-                notes.append(f"animation_frames:{len(frame_bytes_list)}")
-                for fb in frame_bytes_list:
-                    vision_scores = await loop.run_in_executor(
-                        None, analyze_image_bytes, fb, enabled_categories, threshold
-                    )
-                    _merge_scores(all_scores, vision_scores)
+                await _scan_frames(frame_bytes_list, "animation_frames")
             finally:
                 _secure_delete(tmp_path)
 
@@ -141,12 +179,7 @@ async def analyze_media_bytes(
             frame_bytes_list = await loop.run_in_executor(
                 None, sample_video_frames, tmp_path, settings.MEDIA_FRAME_SAMPLE_COUNT
             )
-            notes.append(f"video_frames:{len(frame_bytes_list)}")
-            for fb in frame_bytes_list:
-                vision_scores = await loop.run_in_executor(
-                    None, analyze_image_bytes, fb, enabled_categories, threshold
-                )
-                _merge_scores(all_scores, vision_scores)
+            await _scan_frames(frame_bytes_list, "video_frames")
 
             # STT on video
             if settings.STT_ENABLED:

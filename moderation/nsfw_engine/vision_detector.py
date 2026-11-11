@@ -105,7 +105,7 @@ def _skin_pixel_ratio(img) -> float:
     """
     try:
         rgb = img.convert("RGB").resize((128, 128))
-        pixels = list(rgb.getdata())
+        pixels = list(rgb.get_flattened_data()) if hasattr(rgb, "get_flattened_data") else list(rgb.getdata())
         total = len(pixels)
         skin_count = 0
         for r, g, b in pixels:
@@ -121,6 +121,46 @@ def _skin_pixel_ratio(img) -> float:
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _prepare_rgb_image(image_bytes: bytes):
+    """
+    Decode raw image/sticker bytes via Pillow, honor EXIF orientation,
+    composite transparency onto white background (crucial for Telegram .webp/.png stickers),
+    and gently upscale tiny 128x128 thumbnails for sharper neural/OCR inference.
+    Returns (rgb_pil_image, clean_png_bytes) or (None, None).
+    """
+    if not _PIL_AVAILABLE or not image_bytes:
+        return None, None
+    try:
+        im = Image.open(io.BytesIO(image_bytes))
+        # Ensure we use the first frame cleanly if animated container (e.g. animated WebP/GIF)
+        try:
+            im.seek(0)
+        except Exception:
+            pass
+        im = ImageOps.exif_transpose(im)
+
+        if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+            rgba = im.convert("RGBA")
+            bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+            rgb_img = Image.alpha_composite(bg, rgba).convert("RGB")
+        else:
+            rgb_img = im.convert("RGB")
+
+        w, h = rgb_img.size
+        if max(w, h) < 240 and w > 0 and h > 0:
+            scale = 320.0 / max(w, h)
+            new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+            resample = getattr(Image, "Resampling", Image).LANCZOS
+            rgb_img = rgb_img.resize(new_size, resample)
+
+        out = io.BytesIO()
+        rgb_img.save(out, format="PNG")
+        return rgb_img, out.getvalue()
+    except Exception as exc:
+        logger.debug(f"_prepare_rgb_image failed ({len(image_bytes)} bytes): {exc}")
+        return None, None
 
 
 def analyze_image_bytes(
@@ -143,6 +183,8 @@ def analyze_image_bytes(
     if not image_bytes:
         return scores
 
+    clean_rgb_img, clean_png_bytes = _prepare_rgb_image(image_bytes)
+
     # ── 1. Sexual NSFW Analysis ───────────────────────────────────────────────
     if enabled_categories.get("sexual_nsfw", True):
         best_conf = 0.0
@@ -151,16 +193,21 @@ def analyze_image_bytes(
 
         if _NUDENET_AVAILABLE and _nudenet_detector is not None:
             try:
-                suffix = ".jpg"
-                if image_bytes[:4] == b"\x89PNG":
+                if clean_png_bytes is not None:
                     suffix = ".png"
-                elif image_bytes[:6] in (b"GIF87a", b"GIF89a"):
-                    suffix = ".gif"
-                elif image_bytes[:4] == b"RIFF" or image_bytes[8:12] == b"WEBP":
-                    suffix = ".webp"
+                    payload_bytes = clean_png_bytes
+                else:
+                    suffix = ".jpg"
+                    if image_bytes[:4] == b"\x89PNG":
+                        suffix = ".png"
+                    elif image_bytes[:6] in (b"GIF87a", b"GIF89a"):
+                        suffix = ".gif"
+                    elif image_bytes[:4] == b"RIFF" or image_bytes[8:12] == b"WEBP":
+                        suffix = ".webp"
+                    payload_bytes = image_bytes
 
                 with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                    tmp.write(image_bytes)
+                    tmp.write(payload_bytes)
                     tmp_path = tmp.name
 
                 try:
@@ -201,10 +248,9 @@ def analyze_image_bytes(
 
                 # If raw pass was below threshold, test an autocontrast-enhanced version
                 # to catch dull, faded, washed-out, or dark sticker imagery
-                if best_conf < threshold:
+                if best_conf < threshold and clean_rgb_img is not None:
                     try:
-                        pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-                        enhanced_pil = ImageOps.autocontrast(pil_img, cutoff=2)
+                        enhanced_pil = ImageOps.autocontrast(clean_rgb_img, cutoff=2)
                         buf = io.BytesIO()
                         enhanced_pil.save(buf, format="PNG")
                         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_enh:
@@ -243,18 +289,18 @@ def analyze_image_bytes(
             except Exception as exc:
                 logger.warning(f"NudeNet analysis failed: {exc}")
 
-        # Skin-tone heuristic
-        try:
-            img = Image.open(io.BytesIO(image_bytes))
-            skin_ratio = _skin_pixel_ratio(img)
-            if skin_ratio >= 0.55:
-                skin_conf = min(0.60 + (skin_ratio - 0.55) * 2.0, 0.92)
-                if skin_conf > best_conf:
-                    best_conf = round(skin_conf, 4)
-                    best_reason = f"High skin-pixel ratio: {skin_ratio:.2f}"
-                    best_sev = SeverityLevel.HIGH if skin_conf >= 0.80 else SeverityLevel.MEDIUM
-        except Exception as exc:
-            logger.warning(f"Skin heuristic failed ({len(image_bytes)} bytes): {exc}")
+        # Skin-tone heuristic (using cleanly composited RGB image)
+        if clean_rgb_img is not None:
+            try:
+                skin_ratio = _skin_pixel_ratio(clean_rgb_img)
+                if skin_ratio >= 0.55:
+                    skin_conf = min(0.60 + (skin_ratio - 0.55) * 2.0, 0.92)
+                    if skin_conf > best_conf:
+                        best_conf = round(skin_conf, 4)
+                        best_reason = f"High skin-pixel ratio: {skin_ratio:.2f}"
+                        best_sev = SeverityLevel.HIGH if skin_conf >= 0.80 else SeverityLevel.MEDIUM
+            except Exception as exc:
+                logger.warning(f"Skin heuristic failed ({len(image_bytes)} bytes): {exc}")
 
         triggered = best_conf >= threshold
         scores.append(CategoryScore(
@@ -269,10 +315,10 @@ def analyze_image_bytes(
     check_alcohol = enabled_categories.get("drugs_alcohol", True)
     check_weapons = enabled_categories.get("weapons", True)
 
-    if (check_alcohol or check_weapons) and _MOBILENET_AVAILABLE and _mobilenet_session is not None:
+    if (check_alcohol or check_weapons) and _MOBILENET_AVAILABLE and _mobilenet_session is not None and clean_rgb_img is not None:
         try:
             import numpy as np
-            img = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize((224, 224))
+            img = clean_rgb_img.resize((224, 224))
             img_data = np.array(img).astype("float32") / 255.0
             mean = np.array([0.485, 0.456, 0.406], dtype="float32")
             std = np.array([0.229, 0.224, 0.225], dtype="float32")
@@ -336,8 +382,8 @@ def analyze_image_bytes(
     return scores
 
 
-def sample_gif_frames(gif_bytes: bytes, n_frames: int = 6) -> list[bytes]:
-    """Extract up to n_frames evenly sampled from a GIF, returning JPEG bytes."""
+def sample_gif_frames(gif_bytes: bytes, n_frames: int = 10) -> list[bytes]:
+    """Extract up to n_frames evenly sampled from a GIF or animated WebP, returning PNG/JPEG bytes."""
     if not _PIL_AVAILABLE:
         return []
     frames: list[bytes] = []
@@ -348,46 +394,58 @@ def sample_gif_frames(gif_bytes: bytes, n_frames: int = 6) -> list[bytes]:
         for idx in indices:
             try:
                 gif.seek(idx)
+                frame = gif
+                if frame.mode in ("RGBA", "LA") or (frame.mode == "P" and "transparency" in frame.info):
+                    rgba = frame.convert("RGBA")
+                    bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                    rgb_frame = Image.alpha_composite(bg, rgba).convert("RGB")
+                else:
+                    rgb_frame = frame.convert("RGB")
                 buf = io.BytesIO()
-                gif.convert("RGB").save(buf, format="JPEG")
+                rgb_frame.save(buf, format="JPEG", quality=92)
                 frames.append(buf.getvalue())
             except EOFError:
                 break
     except Exception as exc:
-        logger.warning(f"GIF frame sampling failed: {exc}")
+        logger.warning(f"GIF/WebP frame sampling failed: {exc}")
     return frames
 
 
 def sample_video_frames(video_path: str, n_frames: int = 10) -> list[bytes]:
     """
-    Extract frames from a video using OpenCV (if available) or ffmpeg subprocess.
-    Falls back gracefully with ffmpeg or empty list if neither is available.
+    Extract frames from a video/webm/mp4 using OpenCV (if available) or ffmpeg subprocess.
+    Samples evenly across the FULL clip duration, including .webm video stickers where
+    total frame count may be unknown (-1/0).
     """
     frames: list[bytes] = []
     try:
         import cv2  # type: ignore
         cap = cv2.VideoCapture(video_path)
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total > 0:
-            indices = _even_indices(total, n_frames)
-            for idx in indices:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                ret, frame = cap.read()
-                if not ret:
-                    continue
-                _, buf = cv2.imencode(".jpg", frame)
-                frames.append(buf.tobytes())
-        else:
-            # Crucial for .webm video stickers where frame count is unknown (-1 or 0)
-            step_count = 0
-            while len(frames) < n_frames:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                if step_count % 2 == 0:
+        if cap.isOpened():
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total > 0:
+                indices = _even_indices(total, n_frames)
+                for idx in indices:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                    ret, frame = cap.read()
+                    if not ret:
+                        continue
                     _, buf = cv2.imencode(".jpg", frame)
                     frames.append(buf.tobytes())
-                step_count += 1
+            if not frames:
+                # Reset to start for sequential read (crucial for .webm stickers or unseekable streams)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                buffered_frames = []
+                max_read = 300
+                while len(buffered_frames) < max_read:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    buffered_frames.append(frame)
+                if buffered_frames:
+                    for idx in _even_indices(len(buffered_frames), n_frames):
+                        _, buf = cv2.imencode(".jpg", buffered_frames[idx])
+                        frames.append(buf.tobytes())
         cap.release()
     except Exception as exc:
         logger.warning(f"OpenCV video frame sampling error: {exc}")
@@ -408,12 +466,22 @@ def _ffmpeg_sample(video_path: str, n_frames: int) -> list[bytes]:
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             out_pattern = os.path.join(tmpdir, "frame%03d.jpg")
+            # Sample at ~4 fps up to n_frames (works well for 1-3s GIFs & WebM stickers)
             subprocess.run(
-                ["ffmpeg", "-i", video_path, "-vf", f"select=not(mod(n\\,10))",
+                ["ffmpeg", "-y", "-i", video_path, "-vf", "fps=4",
                  "-vframes", str(n_frames), "-q:v", "2", out_pattern],
                 capture_output=True, timeout=30,
             )
-            for f in sorted(Path(tmpdir).glob("*.jpg"))[:n_frames]:
+            extracted = sorted(Path(tmpdir).glob("*.jpg"))
+            if not extracted:
+                # Ultra-short video/sticker fallback: grab raw frames directly
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", video_path,
+                     "-vframes", str(n_frames), "-q:v", "2", out_pattern],
+                    capture_output=True, timeout=30,
+                )
+                extracted = sorted(Path(tmpdir).glob("*.jpg"))
+            for f in extracted[:n_frames]:
                 frames.append(f.read_bytes())
     except Exception as exc:
         logger.warning(f"ffmpeg frame sampling failed: {exc}")
@@ -421,7 +489,9 @@ def _ffmpeg_sample(video_path: str, n_frames: int) -> list[bytes]:
 
 
 def _even_indices(total: int, n: int) -> list[int]:
+    if total <= 0:
+        return []
     if total <= n:
         return list(range(total))
-    step = total // n
-    return [step * i for i in range(n)]
+    step = max(1, total // n)
+    return [min(total - 1, step * i) for i in range(n)]
