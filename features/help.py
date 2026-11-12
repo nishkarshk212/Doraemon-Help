@@ -253,6 +253,7 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/whitelisted</code> - View list of whitelisted members\n\n"
             "<b>Interactive Panel Controls:</b>\n"
             "• <b>Master Filter:</b> Toggle ON / OFF\n"
+            "• <b>Scan Scope:</b> Enable/Disable 📝 Text, 🎨 Sticker, and 🖼️ Media (Photo/GIF/Video) separately\n"
             "• <b>7 Categories:</b> Individually toggle Sexual/Nudity, Weapons, Violence, Drugs/Alcohol, Self Harm, Hate, and Harassment\n"
             "• <b>Actions:</b> Delete, Warn, Mute (1 hr), Ban, Kick, or Log Only\n"
             "• <b>Sensitivity:</b> Low (40%), Medium (65%), High (80%), or Max Strict (90%)\n"

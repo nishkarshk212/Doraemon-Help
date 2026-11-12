@@ -68,12 +68,30 @@ def get_nsfw_panel_keyboard(chat_id: int, settings: dict) -> InlineKeyboardMarku
     exempt_admins = settings.get("nsfw_exempt_admins", False)
     exempt_str = "🟢 ON" if exempt_admins else "🔴 OFF"
 
+    text_on = settings.get("nsfw_detect_text", True)
+    sticker_on = settings.get("nsfw_detect_sticker", True)
+    media_on = settings.get("nsfw_detect_media", True)
+
     keyboard = [
         [
             InlineKeyboardButton(
                 colored_button(f"Filter: {status_str}", "green" if enabled else "red"),
                 callback_data=f"nsfw_toggle_filter:{chat_id}"
             )
+        ],
+        [
+            InlineKeyboardButton(
+                colored_button(f"📝 Text: {'ON' if text_on else 'OFF'}", "green" if text_on else "red"),
+                callback_data=f"nsfw_toggle_type:text:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                colored_button(f"🎨 Sticker: {'ON' if sticker_on else 'OFF'}", "green" if sticker_on else "red"),
+                callback_data=f"nsfw_toggle_type:sticker:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                colored_button(f"🖼️ Media: {'ON' if media_on else 'OFF'}", "green" if media_on else "red"),
+                callback_data=f"nsfw_toggle_type:media:{chat_id}"
+            ),
         ],
         [
             InlineKeyboardButton(colored_button("🔧 Detection Categories", "blue"), callback_data=f"nsfw_view_categories:{chat_id}"),
@@ -169,6 +187,15 @@ def render_nsfw_panel_text(chat_title: str, settings: dict) -> str:
     exempt_icon = "🟢 <b>YES</b>" if exempt_admins else "🔴 <b>NO</b>"
     cats = settings.get("nsfw_categories", {})
 
+    text_on = settings.get("nsfw_detect_text", True)
+    sticker_on = settings.get("nsfw_detect_sticker", True)
+    media_on = settings.get("nsfw_detect_media", True)
+    scope_line = (
+        f"📝 Text ({'🟢' if text_on else '🔴'}) | "
+        f"🎨 Sticker ({'🟢' if sticker_on else '🔴'}) | "
+        f"🖼️ Media ({'🟢' if media_on else '🔴'})"
+    )
+
     active_cats = [cat_name for cat_id, cat_name in ALL_CATEGORIES if cats.get(cat_id, True)]
     active_count = len(active_cats)
 
@@ -176,11 +203,12 @@ def render_nsfw_panel_text(chat_title: str, settings: dict) -> str:
         f"🔞 <b>AI NSFW & Content Safeguard</b>\n"
         f"<i>Chat: {html.escape(chat_title)}</i>\n\n"
         f"• <b>Status:</b> {status_icon}\n"
+        f"• <b>Scan Scope:</b> {scope_line}\n"
         f"• <b>Enforcement Action:</b> <code>{action}</code>\n"
         f"• <b>Sensitivity Threshold:</b> <code>{threshold:.0%}</code>\n"
         f"• <b>Exempt Admins:</b> {exempt_icon}\n"
         f"• <b>Active Protection Categories:</b> <b>{active_count}/7</b>\n\n"
-        f"💡 <i>Multi-stage vision (NudeNet, MobileNetV2, skin tone), RapidOCR, video/GIF frame sampling & sticker support.</i>"
+        f"💡 <i>Toggle Text, Sticker, and Media (Photo/GIF/Video) filters individually above.</i>"
     )
 
 
@@ -232,6 +260,26 @@ async def handle_nsfw_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         text = render_nsfw_panel_text(chat_title, new_settings)
         await edit_bot_response(query, context, text, reply_markup=get_nsfw_panel_keyboard(chat_id, new_settings), parse_mode=ParseMode.HTML)
         await query.answer(f"Exempt Admins: {'ON' if new_state else 'OFF'}")
+
+    # 2c. Toggle Content Type (Text / Sticker / Media)
+    elif action_type == "nsfw_toggle_type":
+        type_key_map = {
+            "text": ("nsfw_detect_text", "📝 Text Detection"),
+            "sticker": ("nsfw_detect_sticker", "🎨 Sticker Detection"),
+            "media": ("nsfw_detect_media", "🖼️ Media Detection"),
+        }
+        content_kind = parts[1] if len(parts) > 1 else ""
+        if content_kind not in type_key_map:
+            return await query.answer("Unknown content type.", show_alert=True)
+
+        setting_key, label = type_key_map[content_kind]
+        current = settings.get(setting_key, True)
+        new_state = not current
+        update_chat_setting(chat_id, setting_key, new_state)
+        new_settings = get_chat_settings(chat_id)
+        text = render_nsfw_panel_text(chat_title, new_settings)
+        await edit_bot_response(query, context, text, reply_markup=get_nsfw_panel_keyboard(chat_id, new_settings), parse_mode=ParseMode.HTML)
+        await query.answer(f"{label}: {'Enabled' if new_state else 'Disabled'}")
 
     # 3. View Categories
     elif action_type == "nsfw_view_categories":
@@ -407,16 +455,23 @@ async def _analyze_message_target(
     context: ContextTypes.DEFAULT_TYPE,
     cats_config: dict,
     threshold: float,
+    detect_text: bool = True,
+    detect_sticker: bool = True,
+    detect_media: bool = True,
 ) -> Optional[ModerationResult]:
     """
     Unified content extraction and NSFW analysis for stickers (static/animated/video),
     photos, GIFs/animations, videos, video notes, image/video/gif documents, and text.
+    Respects per-type toggles: detect_text, detect_sticker, detect_media.
     """
     caption = target.caption or ""
+    effective_caption = caption if detect_text else ""
     text_content = target.text or caption
 
     # ── 1. Stickers (Static .webp, Animated .tgs, Video .webm) ──────────────
     if target.sticker:
+        if not detect_sticker:
+            return None
         sticker = target.sticker
         # Match NSFW-Detector: stylized / smaller artwork uses stricter sensitivity cap (0.45)
         sticker_thresh = min(threshold, 0.45)
@@ -453,44 +508,56 @@ async def _analyze_message_target(
 
     # ── 2. Photos ───────────────────────────────────────────────────────────
     if target.photo:
+        if not detect_media:
+            if detect_text and caption.strip():
+                return await analyze_text_content(caption, cats_config, threshold=threshold)
+            return None
         photo = max(target.photo, key=lambda p: p.file_size or 0)
         media_bytes = await _download_file_bytes(context, photo)
         if media_bytes:
-            return await analyze_media_bytes(media_bytes, "photo", cats_config, threshold=threshold, caption=caption)
-        if caption:
+            return await analyze_media_bytes(media_bytes, "photo", cats_config, threshold=threshold, caption=effective_caption)
+        if detect_text and caption.strip():
             return await analyze_text_content(caption, cats_config, threshold=threshold)
         return None
 
     # ── 3. Animations / GIFs ────────────────────────────────────────────────
     if target.animation:
+        if not detect_media:
+            if detect_text and caption.strip():
+                return await analyze_text_content(caption, cats_config, threshold=threshold)
+            return None
         anim = target.animation
         thumb_bytes = await _download_file_bytes(context, anim.thumbnail) if anim.thumbnail else None
         if thumb_bytes:
-            thumb_res = await analyze_media_bytes(thumb_bytes, "photo", cats_config, threshold=threshold, caption=caption)
+            thumb_res = await analyze_media_bytes(thumb_bytes, "photo", cats_config, threshold=threshold, caption=effective_caption)
             if thumb_res.flagged:
                 return thumb_res
 
         media_bytes = await _download_file_bytes(context, anim)
         if media_bytes:
-            return await analyze_media_bytes(media_bytes, "animation", cats_config, threshold=threshold, caption=caption)
-        if caption:
+            return await analyze_media_bytes(media_bytes, "animation", cats_config, threshold=threshold, caption=effective_caption)
+        if detect_text and caption.strip():
             return await analyze_text_content(caption, cats_config, threshold=threshold)
         return None
 
     # ── 4. Videos & Video Notes ─────────────────────────────────────────────
     if target.video or target.video_note:
+        if not detect_media:
+            if detect_text and caption.strip():
+                return await analyze_text_content(caption, cats_config, threshold=threshold)
+            return None
         vid_obj = target.video or target.video_note
         ct = "video" if target.video else "video_note"
         thumb_bytes = await _download_file_bytes(context, vid_obj.thumbnail) if getattr(vid_obj, "thumbnail", None) else None
         if thumb_bytes:
-            thumb_res = await analyze_media_bytes(thumb_bytes, "photo", cats_config, threshold=threshold, caption=caption)
+            thumb_res = await analyze_media_bytes(thumb_bytes, "photo", cats_config, threshold=threshold, caption=effective_caption)
             if thumb_res.flagged:
                 return thumb_res
 
         media_bytes = await _download_file_bytes(context, vid_obj)
         if media_bytes:
-            return await analyze_media_bytes(media_bytes, ct, cats_config, threshold=threshold, caption=caption)
-        if caption:
+            return await analyze_media_bytes(media_bytes, ct, cats_config, threshold=threshold, caption=effective_caption)
+        if detect_text and caption.strip():
             return await analyze_text_content(caption, cats_config, threshold=threshold)
         return None
 
@@ -504,21 +571,27 @@ async def _analyze_message_target(
         is_vid = mime.startswith("video/") or fname.endswith((".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"))
 
         if is_gif or is_img or is_vid:
+            if not detect_media:
+                if detect_text and caption.strip():
+                    return await analyze_text_content(caption, cats_config, threshold=threshold)
+                return None
             ct = "gif" if is_gif else ("photo" if is_img else "video")
             thumb_bytes = await _download_file_bytes(context, doc.thumbnail) if doc.thumbnail else None
             if thumb_bytes:
-                thumb_res = await analyze_media_bytes(thumb_bytes, "photo", cats_config, threshold=threshold, caption=caption)
+                thumb_res = await analyze_media_bytes(thumb_bytes, "photo", cats_config, threshold=threshold, caption=effective_caption)
                 if thumb_res.flagged:
                     return thumb_res
             media_bytes = await _download_file_bytes(context, doc)
             if media_bytes:
-                return await analyze_media_bytes(media_bytes, ct, cats_config, threshold=threshold, caption=caption)
-            if caption:
+                return await analyze_media_bytes(media_bytes, ct, cats_config, threshold=threshold, caption=effective_caption)
+            if detect_text and caption.strip():
                 return await analyze_text_content(caption, cats_config, threshold=threshold)
             return None
 
     # ── 6. Plain Text / Caption ─────────────────────────────────────────────
     if text_content and text_content.strip():
+        if not detect_text:
+            return None
         return await analyze_text_content(text_content, cats_config, threshold=threshold)
 
     return None
@@ -698,9 +771,23 @@ async def process_nsfw_moderation(update: Update, context: ContextTypes.DEFAULT_
 
     cats_config = settings.get("nsfw_categories", {c[0]: True for c in ALL_CATEGORIES})
     threshold = float(settings.get("nsfw_threshold", 0.65))
+    detect_text = settings.get("nsfw_detect_text", True)
+    detect_sticker = settings.get("nsfw_detect_sticker", True)
+    detect_media = settings.get("nsfw_detect_media", True)
+
+    if not (detect_text or detect_sticker or detect_media):
+        return False
 
     try:
-        result = await _analyze_message_target(msg, context, cats_config, threshold=threshold)
+        result = await _analyze_message_target(
+            msg,
+            context,
+            cats_config,
+            threshold=threshold,
+            detect_text=detect_text,
+            detect_sticker=detect_sticker,
+            detect_media=detect_media,
+        )
         if result is None:
             return False
 

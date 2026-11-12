@@ -28,7 +28,7 @@ from moderation.nsfw_engine.vision_detector import (
     _MOBILENET_AVAILABLE,
 )
 from moderation.nsfw_engine.ocr_detector import _RAPIDOCR_AVAILABLE
-from features.nsfw_panel import _analyze_message_target
+from features.nsfw_panel import _analyze_message_target, get_nsfw_panel_keyboard, render_nsfw_panel_text
 
 ENABLED = dict(settings.enabled_categories_map)
 
@@ -165,6 +165,49 @@ class TestNSFWVisionAndHandlers(unittest.TestCase):
         res_vid = asyncio.run(_analyze_message_target(big_vid_msg, ctx_vid, ENABLED, threshold=0.65))
         self.assertIsNotNone(res_vid)
         self.assertTrue(res_vid.flagged, "Oversized >20MB video must still be checked via thumbnail")
+
+    def test_content_type_toggles_and_panel(self):
+        # Panel keyboard & text rendering with custom toggles
+        settings_map = {
+            "nsfw_filter_enabled": True,
+            "nsfw_detect_text": False,
+            "nsfw_detect_sticker": True,
+            "nsfw_detect_media": False,
+        }
+        panel_text = render_nsfw_panel_text("Test Group", settings_map)
+        self.assertIn("Text (🔴)", panel_text)
+        self.assertIn("Sticker (🟢)", panel_text)
+        self.assertIn("Media (🔴)", panel_text)
+
+        kb = get_nsfw_panel_keyboard(-100123456, settings_map)
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        self.assertIn("nsfw_toggle_type:text:-100123456", callbacks)
+        self.assertIn("nsfw_toggle_type:sticker:-100123456", callbacks)
+        self.assertIn("nsfw_toggle_type:media:-100123456", callbacks)
+
+        # Text disabled skips plain text NSFW
+        text_msg = MagicMock(
+            photo=None, sticker=None, animation=None, video=None, video_note=None, document=None,
+            text="pornography xxx", caption=None
+        )
+        ctx = MagicMock()
+        self.assertIsNone(asyncio.run(_analyze_message_target(text_msg, ctx, ENABLED, 0.65, detect_text=False)))
+        res_text_on = asyncio.run(_analyze_message_target(text_msg, ctx, ENABLED, 0.65, detect_text=True))
+        self.assertTrue(res_text_on is not None and res_text_on.flagged)
+
+        # Sticker disabled skips sticker
+        stk_msg = MagicMock(
+            photo=None, animation=None, video=None, video_note=None, document=None, text=None, caption=None,
+            sticker=MagicMock(file_id="s1", is_animated=False, is_video=False, thumbnail=None)
+        )
+        self.assertIsNone(asyncio.run(_analyze_message_target(stk_msg, ctx, ENABLED, 0.65, detect_sticker=False)))
+
+        # Media disabled skips photo pixels (with clean/no caption)
+        photo_msg = MagicMock(
+            sticker=None, animation=None, video=None, video_note=None, document=None, text=None, caption="",
+            photo=[MagicMock(file_id="p1", file_size=5000)]
+        )
+        self.assertIsNone(asyncio.run(_analyze_message_target(photo_msg, ctx, ENABLED, 0.65, detect_media=False)))
 
 
 if __name__ == "__main__":
