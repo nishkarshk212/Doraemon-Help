@@ -118,6 +118,7 @@ DEFAULT_CHAT_SETTINGS = {
             "text": None,
             "media": None,
             "media_type": None,
+            "buttons": [],
             "last_sent_at": None,
             "current_message_count": 0
         },
@@ -130,6 +131,7 @@ DEFAULT_CHAT_SETTINGS = {
             "text": None,
             "media": None,
             "media_type": None,
+            "buttons": [],
             "last_sent_at": None,
             "current_message_count": 0
         },
@@ -142,6 +144,7 @@ DEFAULT_CHAT_SETTINGS = {
             "text": None,
             "media": None,
             "media_type": None,
+            "buttons": [],
             "last_sent_at": None,
             "current_message_count": 0
         }
