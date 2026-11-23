@@ -168,7 +168,8 @@ COLLECTIONS = {
     "admins": "admins",
     "hidden_messages": "hidden_messages",
     "rankings": "chat_rankings",
-    "ranking_meta": "ranking_meta"
+    "ranking_meta": "ranking_meta",
+    "assistant": "assistant_settings"
 }
 
 def get_all_chats():

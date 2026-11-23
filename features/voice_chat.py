@@ -82,13 +82,137 @@ def get_peer_id(peer):
         return peer.chat_id
     return None
 
+def get_telethon_client():
+    """Returns the active Telethon client."""
+    global telethon_client
+    return telethon_client
+
+async def handle_group_call_update(event):
+    """Handles updates to group calls to map call IDs to chat entities."""
+    try:
+        call = event.call
+        peer = getattr(event, 'peer', None)
+        if peer is None:
+            logger.info(f"📞 UpdateGroupCall: call={call.id}, no peer (flags missing)")
+            return
+        peer_id = getattr(peer, 'channel_id', None) or getattr(peer, 'chat_id', None) or getattr(peer, 'user_id', None)
+        if peer_id is None:
+            logger.info(f"📞 UpdateGroupCall: call={call.id}, peer={type(peer).__name__} with no id")
+            return
+        logger.info(f"📞 UpdateGroupCall: call_id={call.id}, peer_id={peer_id}")
+        try:
+            try:
+                entity = await telethon_client.get_entity(peer_id)
+                from telethon.tl.types import Channel
+                if isinstance(entity, Channel) or getattr(entity, 'broadcast', False) or getattr(entity, 'megagroup', False):
+                    peer_full = int(f"-100{peer_id}")
+                else:
+                    peer_full = -peer_id
+            except:
+                peer_full = int(f"-100{peer_id}")
+            
+            if ptb_application and ptb_application.bot:
+                try:
+                    await ptb_application.bot.get_chat(peer_full)
+                    logger.info(f"✅ Bot is in chat {peer_full}. Mapping call {call.id}.")
+                except Exception as e:
+                    if str(peer_full).startswith("-100"):
+                        legacy_id = -peer_id
+                        try:
+                            await ptb_application.bot.get_chat(legacy_id)
+                            peer_full = legacy_id
+                            logger.info(f"✅ Bot is in legacy chat {peer_full}. Mapping call {call.id}.")
+                        except:
+                            logger.info(f"⚠️ Bot might not be in chat {peer_full} or {-peer_id} ({e}). Mapping anyway per user request.")
+                    else:
+                        logger.info(f"⚠️ Bot might not be in chat {peer_full} ({e}). Mapping anyway per user request.")
+            
+            if 'entity' in locals():
+                call_to_chat[call.id] = entity
+                logger.info(f"📞 Mapped call {call.id} to chat {entity.id} (entity)")
+            else:
+                call_to_chat[call.id] = peer_full
+                logger.info(f"📞 Mapped call {call.id} to chat {peer_full} (ID only)")
+        except Exception as e:
+            logger.warning(f"Could not get entity for call {call.id} peer {peer_id}: {e}")
+    except Exception as e:
+        logger.error(f"Error in handle_group_call_update: {e}")
+
+async def handle_voice_chat_join(event):
+    """Handles voice chat join events for Users and Channels."""
+    logger.info(f"📥 Received UpdateGroupCallParticipants for call {event.call.id} with {len(event.participants)} participants")
+    asyncio.create_task(_process_vc_join_event(event))
+
+async def reload_telethon_client(new_string_session: str = None):
+    """Hot-reloads the Telethon assistant client dynamically without container restart."""
+    global telethon_client, STRING_SESSION, _vc_monitor_start_ts
+    
+    if new_string_session is not None:
+        STRING_SESSION = new_string_session
+    else:
+        try:
+            from features.assistant_login import get_assistant_session
+            db_sess = get_assistant_session()
+            if db_sess and db_sess.get("string_session"):
+                STRING_SESSION = db_sess["string_session"]
+            else:
+                STRING_SESSION = os.getenv("STRING_SESSION", "")
+        except Exception:
+            STRING_SESSION = os.getenv("STRING_SESSION", "")
+
+    # Disconnect old client if present
+    if telethon_client:
+        try:
+            await telethon_client.disconnect()
+        except Exception as e:
+            logger.warning(f"Error disconnecting previous Telethon client: {e}")
+        telethon_client = None
+
+    if not STRING_SESSION:
+        logger.info("Assistant session cleared. Voice chat monitor stopped.")
+        return True, "Assistant logged out"
+
+    if not API_ID or not API_HASH:
+        logger.warning("API_ID or API_HASH missing.")
+        return False, "Missing API_ID/API_HASH"
+
+    try:
+        new_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+        new_client.add_event_handler(handle_group_call_update, events.Raw(UpdateGroupCall))
+        new_client.add_event_handler(handle_voice_chat_join, events.Raw(UpdateGroupCallParticipants))
+
+        await new_client.start()
+        telethon_client = new_client
+        _vc_monitor_start_ts = datetime.datetime.now()
+        me = await telethon_client.get_me()
+        logger.info(f"✅ Telethon assistant reloaded: {me.first_name} ({me.id})")
+
+        # Load dialogs and pre-scan active VCs
+        asyncio.create_task(telethon_client.get_dialogs(limit=50))
+        asyncio.create_task(scan_active_vcs())
+        return True, me
+    except Exception as e:
+        logger.error(f"❌ Failed to reload Telethon assistant: {e}")
+        telethon_client = None
+        return False, str(e)
+
 async def start_voice_chat_monitor(application: Application):
     """Starts the Telethon client to monitor voice chat events."""
-    global telethon_client, ptb_application
+    global telethon_client, ptb_application, STRING_SESSION
     ptb_application = application
     
     logger.info(f"🎙 VC Monitor: LOG_CHANNEL_ID is {LOG_CHANNEL_ID}")
     
+    # Try loading assistant session from MongoDB first
+    try:
+        from features.assistant_login import get_assistant_session
+        db_sess = get_assistant_session()
+        if db_sess and db_sess.get("string_session"):
+            STRING_SESSION = db_sess["string_session"]
+            logger.info("🎙 Loaded assistant string session from MongoDB.")
+    except Exception as e:
+        logger.warning(f"Could not load assistant session from DB: {e}")
+
     if not API_ID or not API_HASH or not STRING_SESSION:
         logger.warning("⚠️ Telethon credentials missing. Voice chat join notifications disabled.")
         return
@@ -101,76 +225,9 @@ async def start_voice_chat_monitor(application: Application):
         return
 
     # Register Telethon event handlers BEFORE connecting to avoid missing events
-    @telethon_client.on(events.Raw(UpdateGroupCall))
-    async def handle_group_call_update(event):
-        """Handles updates to group calls to map call IDs to chat entities."""
-        try:
-            call = event.call
-            peer = getattr(event, 'peer', None)
-            if peer is None:
-                logger.info(f"📞 UpdateGroupCall: call={call.id}, no peer (flags missing)")
-                return
-            peer_id = getattr(peer, 'channel_id', None) or getattr(peer, 'chat_id', None) or getattr(peer, 'user_id', None)
-            if peer_id is None:
-                logger.info(f"📞 UpdateGroupCall: call={call.id}, peer={type(peer).__name__} with no id")
-                return
-            logger.info(f"📞 UpdateGroupCall: call_id={call.id}, peer_id={peer_id}")
-            try:
-                # Resolve the PTB-compatible chat ID
-                # 1. First try Telethon entity resolution
-                try:
-                    entity = await telethon_client.get_entity(peer_id)
-                    from telethon.tl.types import Channel
-                    if isinstance(entity, Channel) or getattr(entity, 'broadcast', False) or getattr(entity, 'megagroup', False):
-                        peer_full = int(f"-100{peer_id}")
-                    else:
-                        peer_full = -peer_id
-                except:
-                    # Fallback 1: Assume it's a channel/supergroup
-                    peer_full = int(f"-100{peer_id}")
-                
-                # 2. Check if bot is in the chat
-                try:
-                    await ptb_application.bot.get_chat(peer_full)
-                    logger.info(f"✅ Bot is in chat {peer_full}. Mapping call {call.id}.")
-                except Exception as e:
-                    # Fallback 2: Try without -100 prefix for legacy groups
-                    if str(peer_full).startswith("-100"):
-                        legacy_id = -peer_id
-                        try:
-                            await ptb_application.bot.get_chat(legacy_id)
-                            peer_full = legacy_id
-                            logger.info(f"✅ Bot is in legacy chat {peer_full}. Mapping call {call.id}.")
-                        except:
-                            logger.info(f"⚠️ Bot might not be in chat {peer_full} or {-peer_id} ({e}). Mapping anyway per user request.")
-                    else:
-                        logger.info(f"⚠️ Bot might not be in chat {peer_full} ({e}). Mapping anyway per user request.")
-                
-                # If we reached here, we map the call regardless of get_chat success
-                if 'entity' in locals():
-                    call_to_chat[call.id] = entity
-                    logger.info(f"📞 Mapped call {call.id} to chat {entity.id} (entity)")
-                else:
-                    call_to_chat[call.id] = peer_full
-                    logger.info(f"📞 Mapped call {call.id} to chat {peer_full} (ID only)")
-            except Exception as e:
-                logger.warning(f"Could not get entity for call {call.id} peer {peer_id}: {e}")
-        except Exception as e:
-            logger.error(f"Error in handle_group_call_update: {e}")
-
-    @telethon_client.on(events.Raw(UpdateGroupCallParticipants))
-    async def handle_voice_chat_join(event):
-        """Handles voice chat join events for Users and Channels."""
-        logger.info(f"📥 Received UpdateGroupCallParticipants for call {event.call.id} with {len(event.participants)} participants")
-        asyncio.create_task(_process_vc_join_event(event))
+    telethon_client.add_event_handler(handle_group_call_update, events.Raw(UpdateGroupCall))
+    telethon_client.add_event_handler(handle_voice_chat_join, events.Raw(UpdateGroupCallParticipants))
     
-    # Register PTB handlers for invite notifications and VC commands
-    # We do this OUTSIDE the try block so they work even if Telethon fails
-    handlers = get_voice_chat_handlers()
-    for handler in handlers:
-        ptb_application.add_handler(handler)
-    logger.info(f"✅ Voice Chat handlers registered: {[type(h) for h in handlers]}")
-
     # Connect and start the client properly
     try:
         await telethon_client.start()
@@ -1238,6 +1295,281 @@ async def vcrefresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await msg.edit_text("✅ Global VC scan started in background. Check /vcstatus in a moment.")
 
+async def vcbanall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Ban all users currently active in the group's voice chat.
+    Strictly restricted to users currently joined in the Voice Chat.
+    Excludes the bot itself, assistant account, group owner, and group admins.
+    """
+    if not update.effective_chat or update.effective_chat.type == 'private':
+        return await update.message.reply_text("❌ This command can only be used in groups with an active voice chat.")
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not await is_user_admin(chat_id, user_id, context):
+        return await update.message.reply_text("❌ Only group admins can use this command.")
+
+    if not telethon_client or not telethon_client.is_connected():
+        return await update.message.reply_text(
+            "⚠️ <b>Voice Chat assistant is not connected.</b>\n"
+            "Use <code>/login</code> or <code>/login_phone</code> in DM to connect the assistant.",
+            parse_mode=ParseMode.HTML
+        )
+
+    status_msg = await update.message.reply_text("🔍 <i>Scanning active voice chat participants...</i>", parse_mode=ParseMode.HTML)
+
+    try:
+        clean_id = int(str(chat_id).replace('-100', ''))
+        if str(chat_id).startswith('-100'):
+            full = await telethon_client(GetFullChannelRequest(channel=clean_id))
+        else:
+            full = await telethon_client(GetFullChatRequest(chat_id=clean_id))
+
+        if not hasattr(full, 'full_chat') or not hasattr(full.full_chat, 'call') or not full.full_chat.call:
+            return await status_msg.edit_text("❌ <b>No active voice chat found in this group.</b>", parse_mode=ParseMode.HTML)
+
+        call = full.full_chat.call
+        call_info = await telethon_client(GetGroupCallRequest(call=call, limit=200))
+        participants = [p for p in call_info.participants if not getattr(p, 'left', False)]
+
+        if not participants:
+            return await status_msg.edit_text("ℹ️ <b>The voice chat is currently empty.</b>", parse_mode=ParseMode.HTML)
+
+        me = await telethon_client.get_me()
+        assistant_id = me.id if me else 0
+        bot_id = context.bot.id
+
+        await status_msg.edit_text(f"⚡ <i>Found {len(participants)} participants in VC. Processing VC bans...</i>", parse_mode=ParseMode.HTML)
+
+        banned_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        for p in participants:
+            p_peer = p.peer
+            p_id = getattr(p_peer, 'user_id', getattr(p_peer, 'channel_id', None))
+            if not p_id:
+                continue
+
+            # Exclude assistant, bot, and bot owner
+            if p_id in (assistant_id, bot_id, OWNER_ID):
+                skipped_count += 1
+                continue
+
+            # Check if group admin or owner
+            if await is_user_admin(chat_id, p_id, context):
+                skipped_count += 1
+                continue
+
+            # Check if bot account
+            try:
+                member = await context.bot.get_chat_member(chat_id, p_id)
+                if member.user.is_bot:
+                    skipped_count += 1
+                    continue
+            except Exception:
+                pass
+
+            # Eject/mute from VC via Telethon
+            try:
+                await telethon_client(EditGroupCallParticipantRequest(
+                    call=call,
+                    participant=p_peer,
+                    left=True,
+                    muted=True
+                ))
+            except Exception:
+                pass
+
+            # Ban from group
+            try:
+                await context.bot.ban_chat_member(chat_id, int(p_id))
+                banned_count += 1
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.warning(f"Failed to ban VC user {p_id}: {e}")
+                failed_count += 1
+
+        res_text = (
+            f"🚫 <b><u>VOICE CHAT BAN ALL COMPLETED</u></b>\n\n"
+            f"👥 <b>Active in VC:</b> <code>{len(participants)}</code>\n"
+            f"✅ <b>Successfully Banned:</b> <code>{banned_count}</code>\n"
+            f"🛡 <b>Skipped (Admins/Bots):</b> <code>{skipped_count}</code>\n"
+        )
+        if failed_count > 0:
+            res_text += f"⚠️ <b>Failed to Ban:</b> <code>{failed_count}</code>\n"
+
+        await status_msg.edit_text(res_text, parse_mode=ParseMode.HTML)
+
+    except Exception as e:
+        logger.error(f"Error in vcbanall_command: {e}", exc_info=True)
+        await status_msg.edit_text(f"❌ <b>Error executing /vcbanall:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
+
+async def vcmuteall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Mute all active non-admin users currently joined in the voice chat.
+    Strictly restricted to users currently joined in the Voice Chat.
+    """
+    if not update.effective_chat or update.effective_chat.type == 'private':
+        return await update.message.reply_text("❌ This command can only be used in groups with an active voice chat.")
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not await is_user_admin(chat_id, user_id, context):
+        return await update.message.reply_text("❌ Only group admins can use this command.")
+
+    if not telethon_client or not telethon_client.is_connected():
+        return await update.message.reply_text(
+            "⚠️ <b>Voice Chat assistant is not connected.</b>\n"
+            "Use <code>/login</code> or <code>/login_phone</code> in DM to connect the assistant.",
+            parse_mode=ParseMode.HTML
+        )
+
+    status_msg = await update.message.reply_text("🔍 <i>Scanning active voice chat participants...</i>", parse_mode=ParseMode.HTML)
+
+    try:
+        clean_id = int(str(chat_id).replace('-100', ''))
+        if str(chat_id).startswith('-100'):
+            full = await telethon_client(GetFullChannelRequest(channel=clean_id))
+        else:
+            full = await telethon_client(GetFullChatRequest(chat_id=clean_id))
+
+        if not hasattr(full, 'full_chat') or not hasattr(full.full_chat, 'call') or not full.full_chat.call:
+            return await status_msg.edit_text("❌ <b>No active voice chat found in this group.</b>", parse_mode=ParseMode.HTML)
+
+        call = full.full_chat.call
+        call_info = await telethon_client(GetGroupCallRequest(call=call, limit=200))
+        participants = [p for p in call_info.participants if not getattr(p, 'left', False)]
+
+        if not participants:
+            return await status_msg.edit_text("ℹ️ <b>The voice chat is currently empty.</b>", parse_mode=ParseMode.HTML)
+
+        me = await telethon_client.get_me()
+        assistant_id = me.id if me else 0
+        bot_id = context.bot.id
+
+        await status_msg.edit_text(f"⚡ <i>Found {len(participants)} participants in VC. Muting members...</i>", parse_mode=ParseMode.HTML)
+
+        muted_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        for p in participants:
+            p_peer = p.peer
+            p_id = getattr(p_peer, 'user_id', getattr(p_peer, 'channel_id', None))
+            if not p_id:
+                continue
+
+            if p_id in (assistant_id, bot_id, OWNER_ID):
+                skipped_count += 1
+                continue
+
+            if await is_user_admin(chat_id, p_id, context):
+                skipped_count += 1
+                continue
+
+            try:
+                await telethon_client(EditGroupCallParticipantRequest(
+                    call=call,
+                    participant=p_peer,
+                    muted=True
+                ))
+                muted_count += 1
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                logger.warning(f"Failed to mute VC participant {p_id}: {e}")
+                failed_count += 1
+
+        res_text = (
+            f"🔇 <b><u>VOICE CHAT MUTE ALL COMPLETED</u></b>\n\n"
+            f"👥 <b>Active in VC:</b> <code>{len(participants)}</code>\n"
+            f"🔇 <b>Successfully Muted:</b> <code>{muted_count}</code>\n"
+            f"🛡 <b>Skipped (Admins/Bots):</b> <code>{skipped_count}</code>\n"
+        )
+        if failed_count > 0:
+            res_text += f"⚠️ <b>Failed (Assistant needs 'Manage Voice Chats' permission?):</b> <code>{failed_count}</code>\n"
+
+        await status_msg.edit_text(res_text, parse_mode=ParseMode.HTML)
+
+    except Exception as e:
+        logger.error(f"Error in vcmuteall_command: {e}", exc_info=True)
+        await status_msg.edit_text(f"❌ <b>Error executing /vcmuteall:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
+
+async def vcunmuteall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Unmute all active users currently joined in the voice chat.
+    Strictly restricted to users currently joined in the Voice Chat.
+    """
+    if not update.effective_chat or update.effective_chat.type == 'private':
+        return await update.message.reply_text("❌ This command can only be used in groups with an active voice chat.")
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not await is_user_admin(chat_id, user_id, context):
+        return await update.message.reply_text("❌ Only group admins can use this command.")
+
+    if not telethon_client or not telethon_client.is_connected():
+        return await update.message.reply_text(
+            "⚠️ <b>Voice Chat assistant is not connected.</b>\n"
+            "Use <code>/login</code> or <code>/login_phone</code> in DM to connect the assistant.",
+            parse_mode=ParseMode.HTML
+        )
+
+    status_msg = await update.message.reply_text("🔍 <i>Scanning active voice chat participants...</i>", parse_mode=ParseMode.HTML)
+
+    try:
+        clean_id = int(str(chat_id).replace('-100', ''))
+        if str(chat_id).startswith('-100'):
+            full = await telethon_client(GetFullChannelRequest(channel=clean_id))
+        else:
+            full = await telethon_client(GetFullChatRequest(chat_id=clean_id))
+
+        if not hasattr(full, 'full_chat') or not hasattr(full.full_chat, 'call') or not full.full_chat.call:
+            return await status_msg.edit_text("❌ <b>No active voice chat found in this group.</b>", parse_mode=ParseMode.HTML)
+
+        call = full.full_chat.call
+        call_info = await telethon_client(GetGroupCallRequest(call=call, limit=200))
+        participants = [p for p in call_info.participants if not getattr(p, 'left', False)]
+
+        if not participants:
+            return await status_msg.edit_text("ℹ️ <b>The voice chat is currently empty.</b>", parse_mode=ParseMode.HTML)
+
+        unmuted_count = 0
+        failed_count = 0
+
+        await status_msg.edit_text(f"⚡ <i>Found {len(participants)} participants in VC. Unmuting members...</i>", parse_mode=ParseMode.HTML)
+
+        for p in participants:
+            p_peer = p.peer
+            try:
+                await telethon_client(EditGroupCallParticipantRequest(
+                    call=call,
+                    participant=p_peer,
+                    muted=False
+                ))
+                unmuted_count += 1
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                logger.warning(f"Failed to unmute participant in VC: {e}")
+                failed_count += 1
+
+        res_text = (
+            f"🔊 <b><u>VOICE CHAT UNMUTE ALL COMPLETED</u></b>\n\n"
+            f"👥 <b>Active in VC:</b> <code>{len(participants)}</code>\n"
+            f"🔊 <b>Successfully Unmuted:</b> <code>{unmuted_count}</code>\n"
+        )
+        if failed_count > 0:
+            res_text += f"⚠️ <b>Failed (Assistant needs 'Manage Voice Chats' permission?):</b> <code>{failed_count}</code>\n"
+
+        await status_msg.edit_text(res_text, parse_mode=ParseMode.HTML)
+
+    except Exception as e:
+        logger.error(f"Error in vcunmuteall_command: {e}", exc_info=True)
+        await status_msg.edit_text(f"❌ <b>Error executing /vcunmuteall:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
+
 def get_voice_chat_handlers():
     """Returns handlers for voice chat events."""
     return [
@@ -1245,7 +1577,10 @@ def get_voice_chat_handlers():
         MessageHandler(filters.StatusUpdate.VIDEO_CHAT_PARTICIPANTS_INVITED, voice_chat_invite_handler),
         CommandHandler("vcclean", vcclean_command),
         CommandHandler("vcstatus", vcstatus_command),
-        CommandHandler("vcrefresh", vcrefresh_command)
+        CommandHandler("vcrefresh", vcrefresh_command),
+        CommandHandler("vcbanall", vcbanall_command),
+        CommandHandler("vcmuteall", vcmuteall_command),
+        CommandHandler("vcunmuteall", vcunmuteall_command),
     ]
 
 async def stop_voice_chat_monitor():

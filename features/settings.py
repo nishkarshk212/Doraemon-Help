@@ -1125,11 +1125,13 @@ def get_manager_settings_keyboard(settings):
 
 def get_blocking_notification_settings_keyboard(settings):
     """Get blocking notification settings keyboard."""
+    send_status = "✅ Enabled" if settings.get("blocking_send_notifications", False) else "❌ Disabled"
     delete_status = "✅" if settings.get("blocking_delete_notifications", True) else "❌"
     timer = settings.get("blocking_notification_timer", 30)
     custom_text = "✅ Set" if settings.get("blocking_custom_text") else "❌ Not Set"
     
     keyboard = [
+        [InlineKeyboardButton(colored_button(f"Warning Messages: {send_status}", "blue"), callback_data="set_toggle_blocking_send_notifications")],
         [InlineKeyboardButton(colored_button(f"Delete Notifications: {delete_status}", "blue"), callback_data="set_toggle_blocking_delete_notifications")],
         [
             InlineKeyboardButton(colored_button("-5s", "blue"), callback_data="set_blocking_timer_sub_5"),
@@ -2734,6 +2736,9 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current = settings.get("emergency_mode", "daily")
             new_val = "today" if current == "daily" else "daily"
             update_chat_setting(chat_id, "emergency_mode", new_val)
+        elif key == "blocking_send_notifications":
+            new_val = not settings.get(key, False)
+            update_chat_setting(chat_id, key, new_val)
         elif key == "blocking_delete_notifications":
             new_val = not settings.get(key, True)
             update_chat_setting(chat_id, key, new_val)

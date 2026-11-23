@@ -41,6 +41,7 @@ DEFAULT_BLOCKING_SETTINGS = {
     "msg_length_max": 2000,
     "msg_length_delete": False,
     "msg_length_penalty": "off",  # off, warn, kick, mute, ban
+    "blocking_send_notifications": False,
     "custom_block_list": [],
     "custom_block_media": [],
     "custom_block_stickers": [],
@@ -119,8 +120,14 @@ def is_emergency_active(settings, chat_id=None):
 
 async def send_blocking_notification(update: Update, context: ContextTypes.DEFAULT_TYPE, settings, default_text):
     """Sends a notification when content is blocked, respects settings."""
+    # Never send warning notifications on blocked content if disabled (default: False - silent delete)
+    if not settings.get("blocking_send_notifications", False):
+        return
+
     chat_id = update.effective_chat.id
     msg = update.effective_message
+    if not msg:
+        return
     
     custom_text = settings.get("blocking_custom_text")
     if custom_text:
@@ -541,37 +548,38 @@ async def handle_blocking(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if is_admin:
                     return False
             
-            # Send notification for blocked content
-            is_forwarded_msg = (hasattr(msg, 'forward_origin') and msg.forward_origin is not None) or \
-                              (hasattr(msg, 'forward_from') and msg.forward_from is not None)
-            
-            if is_length_violation:
-                user_id_str = update.effective_user.id if update.effective_user else 0
-                await send_blocking_notification(
-                    update, context, settings,
-                    f"📏 <b>Message too long!</b>\n\n"
-                    f"User <code>{user_id_str}</code>, your message exceeded the character limit of <b>{length_limit_val}</b> characters "
-                    f"(length: <b>{actual_length}</b>)."
-                )
-            elif msg.audio and settings.get("block_audio"):
-                await send_blocking_notification(
-                    update, context, settings,
-                    f"🎵 <b>Music files are not allowed in this group.</b>\n\n"
-                    f"<i>Your audio file has been automatically deleted.</i>"
-                )
-            elif is_forwarded_msg and settings.get("block_forward"):
-                await send_blocking_notification(
-                    update, context, settings,
-                    f"⚠️ <b>Forwarded messages are not allowed in this group.</b>\n\n"
-                    f"<i>Your forwarded message has been automatically deleted.</i>"
-                )
-            else:
-                # Generic notification for other blocked content
-                await send_blocking_notification(
-                    update, context, settings,
-                    f"⚠️ <b>Content blocked!</b>\n\n"
-                    f"<i>Your message has been automatically deleted due to group rules.</i>"
-                )
+            # Only send notification if explicitly enabled in settings (default: False - silent delete)
+            if settings.get("blocking_send_notifications", False):
+                is_forwarded_msg = (hasattr(msg, 'forward_origin') and msg.forward_origin is not None) or \
+                                  (hasattr(msg, 'forward_from') and msg.forward_from is not None)
+                
+                if is_length_violation:
+                    user_id_str = update.effective_user.id if update.effective_user else 0
+                    await send_blocking_notification(
+                        update, context, settings,
+                        f"📏 <b>Message too long!</b>\n\n"
+                        f"User <code>{user_id_str}</code>, your message exceeded the character limit of <b>{length_limit_val}</b> characters "
+                        f"(length: <b>{actual_length}</b>)."
+                    )
+                elif msg.audio and settings.get("block_audio"):
+                    await send_blocking_notification(
+                        update, context, settings,
+                        f"🎵 <b>Music files are not allowed in this group.</b>\n\n"
+                        f"<i>Your audio file has been automatically deleted.</i>"
+                    )
+                elif is_forwarded_msg and settings.get("block_forward"):
+                    await send_blocking_notification(
+                        update, context, settings,
+                        f"⚠️ <b>Forwarded messages are not allowed in this group.</b>\n\n"
+                        f"<i>Your forwarded message has been automatically deleted.</i>"
+                    )
+                else:
+                    # Generic notification for other blocked content
+                    await send_blocking_notification(
+                        update, context, settings,
+                        f"⚠️ <b>Content blocked!</b>\n\n"
+                        f"<i>Your message has been automatically deleted due to group rules.</i>"
+                    )
                 
             await msg.delete()
             return True

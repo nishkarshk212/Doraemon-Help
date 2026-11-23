@@ -279,16 +279,19 @@ async def check_blocked_content_handler(update: Update, context: ContextTypes.DE
         # 3. Apply penalties for regular members
         settings = get_chat_settings(chat_id)
         limit = settings.get("block_warn_limit", 3)
-        penalty = settings.get("block_warn_penalty", "warn") # warn, mute, ban, kick
+        penalty = settings.get("block_warn_penalty", "off") # off, warn, mute, ban, kick
         
         user_name = update.effective_user.first_name if update.effective_user else "User"
         
-        if penalty == "warn":
-            from handlers.blocking_handler import send_blocking_notification
-            await send_blocking_notification(
-                update, context, settings,
-                f"⚠️ User <code>{user_id}</code>, that content is blocked in this group. Please avoid using it."
-            )
+        # On block content do not send any warning message (silent delete by default)
+        if penalty in ["warn", "off", "none"]:
+            if settings.get("blocking_send_notifications", False):
+                from handlers.blocking_handler import send_blocking_notification
+                await send_blocking_notification(
+                    update, context, settings,
+                    f"⚠️ User <code>{user_id}</code>, that content is blocked in this group. Please avoid using it."
+                )
+            return
         elif penalty == "mute":
             try:
                 await context.bot.restrict_chat_member(chat_id, user_id, permissions=ChatPermissions(can_send_messages=False))
@@ -330,13 +333,14 @@ async def check_blocked_content_handler(update: Update, context: ContextTypes.DE
         if effective_limit > 0 and len(msg_content) > effective_limit:
             try:
                 await msg.delete()
-                from handlers.blocking_handler import send_blocking_notification
-                await send_blocking_notification(
-                    update, context, settings,
-                    f"📏 <b>Message too long!</b>\n\n"
-                    f"User <code>{user_id}</code>, your message exceeded the allowed limit of <b>{effective_limit}</b> characters "
-                    f"({len(msg_content)}/{effective_limit})."
-                )
+                if settings.get("blocking_send_notifications", False):
+                    from handlers.blocking_handler import send_blocking_notification
+                    await send_blocking_notification(
+                        update, context, settings,
+                        f"📏 <b>Message too long!</b>\n\n"
+                        f"User <code>{user_id}</code>, your message exceeded the allowed limit of <b>{effective_limit}</b> characters "
+                        f"({len(msg_content)}/{effective_limit})."
+                    )
             except Exception as e:
                 logging.error(f"Failed to delete message exceeding length limit: {e}")
             return

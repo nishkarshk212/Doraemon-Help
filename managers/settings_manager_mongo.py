@@ -41,7 +41,7 @@ DEFAULT_CHAT_SETTINGS = {
     "warn_limit": 3,
     "warn_penalty": "ban",
     "block_warn_limit": 3,
-    "block_warn_penalty": "warn",
+    "block_warn_penalty": "off",
     "msg_length_limit": 0, # 0 means disabled
     "command_deletion": False,
     "command_access": "all",
@@ -253,6 +253,7 @@ DEFAULT_CHAT_SETTINGS = {
     "emergency_end_time": "23:59",
     "emergency_mode": "daily", # daily, today
     "emergency_apply_on": "members",
+    "blocking_send_notifications": False,
     "blocking_delete_notifications": True,
     "blocking_notification_timer": 30,
     "blocking_custom_text": None,

@@ -10,6 +10,18 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")
 OWNER_ID = int(os.getenv("OWNER_ID", 8519966775))
 
+def _safe_int_env(name, default=0):
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+API_ID = _safe_int_env("API_ID", 0)
+API_HASH = os.getenv("API_HASH", "")
+
 START_IMG = os.getenv("START_IMG", "https://i.ibb.co/xSd6kWdj/Group-Help-Bot-Shield-Branding.png").split()
 
 async def log_to_channel(context, message):
