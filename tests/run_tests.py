@@ -121,6 +121,7 @@ class TestAssistantAndVC(unittest.TestCase):
             mock_client.is_connected = MagicMock(return_value=False)
 
             with patch("features.assistant_login.is_sudo", return_value=True), \
+                 patch("features.assistant_login.StringSession", return_value=MagicMock()), \
                  patch("features.assistant_login.TelegramClient", return_value=mock_client), \
                  patch("features.assistant_login.save_assistant_session") as mock_save, \
                  patch("features.voice_chat.reload_telethon_client", AsyncMock(return_value=(True, "OK"))):

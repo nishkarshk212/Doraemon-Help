@@ -163,9 +163,14 @@ async def login_session_command(update: Update, context: ContextTypes.DEFAULT_TY
     session_str = " ".join(args).strip().strip("'\"")
     status_msg = await update.message.reply_text("🔄 <i>Verifying Telethon string session...</i>", parse_mode=ParseMode.HTML)
 
+    try:
+        session_obj = StringSession(session_str)
+    except Exception as e:
+        return await status_msg.edit_text(f"❌ <b>Invalid session string format:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
+
     test_client = None
     try:
-        test_client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+        test_client = TelegramClient(session_obj, API_ID, API_HASH)
         await test_client.connect()
 
         if not await test_client.is_user_authorized():
