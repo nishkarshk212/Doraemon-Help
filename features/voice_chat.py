@@ -68,6 +68,9 @@ _vc_monitor_start_ts = None
 # Calls we've already resolved but the bot isn't a member — skip resolution next time
 _failed_resolutions = {} # call_id -> timestamp
 
+# Background task for periodic VC member sync
+_auto_vc_sync_task = None
+
 # Track current participants per call to detect actual joins/leaves
 # call_id -> set(user_id)
 current_participants_map = {}
@@ -190,6 +193,12 @@ async def reload_telethon_client(new_string_session: str = None):
         # Load dialogs and pre-scan active VCs
         asyncio.create_task(telethon_client.get_dialogs(limit=50))
         asyncio.create_task(scan_active_vcs())
+        
+        # Start automatic VC member sync
+        global _auto_vc_sync_task
+        if _auto_vc_sync_task and not _auto_vc_sync_task.done():
+            _auto_vc_sync_task.cancel()
+        _auto_vc_sync_task = asyncio.create_task(auto_vc_member_sync_task())
         return True, me
     except Exception as e:
         logger.error(f"❌ Failed to reload Telethon assistant: {e}")
@@ -242,6 +251,12 @@ async def start_voice_chat_monitor(application: Application):
         
         # Start automatic ghost cleaner
         asyncio.create_task(auto_ghost_cleaner_task())
+        
+        # Start automatic VC member sync
+        global _auto_vc_sync_task
+        if _auto_vc_sync_task and not _auto_vc_sync_task.done():
+            _auto_vc_sync_task.cancel()
+        _auto_vc_sync_task = asyncio.create_task(auto_vc_member_sync_task())
         
         # Pre-scan active VCs to populate call_to_chat mapping
         asyncio.create_task(scan_active_vcs())
@@ -303,18 +318,37 @@ async def auto_ghost_cleaner_task():
                     await clean_ghost_participants(chat_id)
                     await asyncio.sleep(5) # Delay between groups to avoid flood
 
-            # Auto-mute non-members in groups where vc_auto_mute_non_members_enabled = True
+            # Auto-sync VC members in groups where vc_auto_mute_non_members_enabled = True
             chats_with_automute = list(collection.find({"vc_auto_mute_non_members_enabled": True}))
             for chat_doc in chats_with_automute:
                 cid = chat_doc.get("chat_id")
                 if cid:
-                    await check_and_mute_non_members_in_vc(cid)
+                    await check_and_sync_vc_members(cid)
                     await asyncio.sleep(3)
                     
         except Exception as e:
             logger.error(f"Error in auto_ghost_cleaner_task: {e}")
             
         await asyncio.sleep(3600) # Run every hour
+
+async def auto_vc_member_sync_task():
+    """Periodically checks active VCs and syncs member mute/unmute status."""
+    await asyncio.sleep(30) # Initial delay after startup
+    while True:
+        try:
+            collection = get_collection(COLLECTIONS['settings'])
+            if collection is not None and telethon_client and telethon_client.is_connected():
+                chats_with_automute = list(collection.find({"vc_auto_mute_non_members_enabled": True}))
+                for chat_doc in chats_with_automute:
+                    cid = chat_doc.get("chat_id")
+                    if cid:
+                        await check_and_sync_vc_members(cid)
+                        await asyncio.sleep(2) # Avoid flood between chats
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in auto_vc_member_sync_task: {e}")
+        await asyncio.sleep(45) # Run every 45 seconds
 
 async def scan_active_vcs():
     """Pre-scan all groups for active VCs to populate call_to_chat mapping."""
@@ -766,6 +800,9 @@ async def _process_single_participant(call_id, participant, chat_entity, is_join
                         logger.info(f"🔇 [AUTO-MUTE] User {user_id} joined VC in {settings_chat_id} but is not a group member. Auto-muting in VC...")
                         await mute_vc_participant(settings_chat_id, user_id, muted=True)
                         is_auto_muted = True
+                    else:
+                        logger.info(f"🔊 [AUTO-UNMUTE] User {user_id} joined VC in {settings_chat_id} and is a group member. Ensuring unmuted in VC...")
+                        await mute_vc_participant(settings_chat_id, user_id, muted=False)
 
             if is_join and not settings.get("vc_user_join_enabled", True):
                 logger.info(f"🔇 [STOP] Join notifs disabled in {settings_chat_id}")
@@ -1606,13 +1643,17 @@ async def vcunmuteall_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Error in vcunmuteall_command: {e}", exc_info=True)
         await status_msg.edit_text(f"❌ <b>Error executing /vcunmuteall:</b> <code>{e}</code>", parse_mode=ParseMode.HTML)
 
-async def check_and_mute_non_members_in_vc(chat_id):
+async def check_and_sync_vc_members(chat_id):
     """
-    Scans all active VC participants in chat_id and mutes any who are not group members.
+    First checks all active participants currently in the group Voice Chat.
+    Then checks if each participant is a member of the group.
+    - If VC participant is NOT a member of group -> mute the user.
+    - Vice-versa (If VC participant IS a member of group) -> unmute the user.
     Skips the bot itself, the assistant, the bot owner, and group admins.
+    Returns (muted_count, unmuted_count).
     """
     if not telethon_client or not telethon_client.is_connected():
-        return 0
+        return 0, 0
     try:
         clean_id = int(str(chat_id).replace('-100', ''))
         if str(chat_id).startswith('-100'):
@@ -1621,17 +1662,21 @@ async def check_and_mute_non_members_in_vc(chat_id):
             full = await telethon_client(GetFullChatRequest(chat_id=clean_id))
 
         if not hasattr(full, 'full_chat') or not hasattr(full.full_chat, 'call') or not full.full_chat.call:
-            return 0
+            return 0, 0
 
         call = full.full_chat.call
         call_info = await telethon_client(GetGroupCallRequest(call=call, limit=200))
         participants = [p for p in call_info.participants if not getattr(p, 'left', False)]
+        if not participants:
+            return 0, 0
 
         me = await telethon_client.get_me() if telethon_client else None
         assistant_id = me.id if me else 0
-        bot_id = ptb_application.bot.id if ptb_application and ptb_application.bot else 0
+        bot_id = ptb_application.bot.id if (ptb_application and ptb_application.bot) else 0
 
         muted_count = 0
+        unmuted_count = 0
+
         for p in participants:
             p_peer = p.peer
             p_id = getattr(p_peer, 'user_id', getattr(p_peer, 'channel_id', None))
@@ -1641,39 +1686,66 @@ async def check_and_mute_non_members_in_vc(chat_id):
             if await is_user_admin(chat_id, p_id, ptb_application):
                 continue
 
+            # Check group membership status
             is_member = False
             try:
                 cm = await ptb_application.bot.get_chat_member(chat_id=chat_id, user_id=p_id)
-                if cm and cm.status in ['member', 'administrator', 'creator', 'restricted']:
+                if cm and cm.status in ['member', 'administrator', 'creator']:
                     is_member = True
+                elif cm and cm.status == 'restricted':
+                    is_member = getattr(cm, 'is_member', True)
             except Exception:
                 is_member = False
 
-            if not is_member:
-                logger.info(f"🔇 [AUTO-MUTE] User {p_id} in {chat_id} is not in group. Auto-muting in VC...")
-                try:
-                    await telethon_client(EditGroupCallParticipantRequest(
-                        call=call,
-                        participant=p_peer,
-                        muted=True
-                    ))
-                    muted_count += 1
-                    await asyncio.sleep(0.3)
-                except Exception as me_err:
-                    logger.warning(f"Failed to auto-mute non-member {p_id} in VC: {me_err}")
+            is_currently_muted = getattr(p, 'muted', False)
 
-        return muted_count
+            if not is_member:
+                # Non-member in VC -> Mute user
+                if not is_currently_muted:
+                    logger.info(f"🔇 [AUTO-MUTE] User {p_id} in {chat_id} is in VC but not in group. Muting...")
+                    try:
+                        await telethon_client(EditGroupCallParticipantRequest(
+                            call=call,
+                            participant=p_peer,
+                            muted=True
+                        ))
+                        muted_count += 1
+                        await asyncio.sleep(0.2)
+                    except Exception as me_err:
+                        logger.warning(f"Failed to auto-mute non-member {p_id} in VC: {me_err}")
+            else:
+                # Vice-versa: Group member in VC -> Unmute user if currently muted
+                if is_currently_muted:
+                    logger.info(f"🔊 [AUTO-UNMUTE] User {p_id} in {chat_id} is in VC and is a group member. Unmuting...")
+                    try:
+                        await telethon_client(EditGroupCallParticipantRequest(
+                            call=call,
+                            participant=p_peer,
+                            muted=False
+                        ))
+                        unmuted_count += 1
+                        await asyncio.sleep(0.2)
+                    except Exception as ue_err:
+                        logger.warning(f"Failed to auto-unmute member {p_id} in VC: {ue_err}")
+
+        return muted_count, unmuted_count
     except Exception as e:
-        logger.warning(f"Error in check_and_mute_non_members_in_vc for {chat_id}: {e}")
-        return 0
+        logger.warning(f"Error in check_and_sync_vc_members for {chat_id}: {e}")
+        return 0, 0
+
+async def check_and_mute_non_members_in_vc(chat_id):
+    """Alias for check_and_sync_vc_members returning muted_count for backwards compatibility."""
+    muted, _ = await check_and_sync_vc_members(chat_id)
+    return muted
 
 async def vcautomute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Admin command to toggle or check auto-muting of non-members in Voice Chat.
+    Admin command to toggle or sync auto-muting of non-members in Voice Chat.
     Usage:
       /vcautomute - Check status
-      /vcautomute on - Enable auto-mute for non-members
+      /vcautomute on - Enable auto-mute for non-members and sync VC
       /vcautomute off - Disable auto-mute for non-members
+      /vcautomute sync - Scan VC participants and sync mute/unmute state
     """
     if not update.effective_chat or update.effective_chat.type == 'private':
         return await update.message.reply_text("❌ This command can only be used in groups.")
@@ -1692,10 +1764,11 @@ async def vcautomute_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await update.message.reply_text(
             f"🎙 <b><u>VC AUTO-MUTE NON-MEMBERS</u></b>\n\n"
             f"<b>Current Status:</b> {current_status}\n\n"
-            "<i>When enabled, users who join the Voice Chat without joining the group will be automatically muted.</i>\n\n"
+            "<i>When enabled, users who are not in the group are automatically muted in Voice Chat, and group members are unmuted.</i>\n\n"
             "<b>Usage:</b>\n"
-            "• <code>/vcautomute on</code> — Enable auto-mute\n"
-            "• <code>/vcautomute off</code> — Disable auto-mute\n\n"
+            "• <code>/vcautomute on</code> — Enable auto-mute & sync\n"
+            "• <code>/vcautomute off</code> — Disable auto-mute\n"
+            "• <code>/vcautomute sync</code> — Scan VC participants and sync mute status now\n\n"
             "💡 <i>You can also toggle this in <code>/settings</code> → Voice Chat.</i>",
             parse_mode=ParseMode.HTML
         )
@@ -1704,17 +1777,32 @@ async def vcautomute_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     from managers.settings_manager_mongo import update_chat_setting
     if arg in ["on", "enable", "yes", "true", "1"]:
         update_chat_setting(chat_id, "vc_auto_mute_non_members_enabled", True)
-        msg = await update.message.reply_text("✅ <b>VC Auto-Mute Non-Members has been ENABLED.</b>\n<i>Scanning active voice chat to mute existing non-members...</i>", parse_mode=ParseMode.HTML)
-        muted_count = await check_and_mute_non_members_in_vc(chat_id)
+        msg = await update.message.reply_text("✅ <b>VC Auto-Mute Non-Members has been ENABLED.</b>\n<i>Scanning active voice chat participants...</i>", parse_mode=ParseMode.HTML)
+        muted_count, unmuted_count = await check_and_sync_vc_members(chat_id)
+        res_lines = ["✅ <b>VC Auto-Mute Non-Members has been ENABLED.</b>"]
         if muted_count > 0:
-            await msg.edit_text(f"✅ <b>VC Auto-Mute Non-Members has been ENABLED.</b>\n🔇 <i>Auto-muted {muted_count} non-members currently in VC.</i>", parse_mode=ParseMode.HTML)
-        else:
-            await msg.edit_text("✅ <b>VC Auto-Mute Non-Members has been ENABLED.</b>\n<i>Non-members will be automatically muted when they join VC.</i>", parse_mode=ParseMode.HTML)
+            res_lines.append(f"🔇 <i>Auto-muted: {muted_count} non-members</i>")
+        if unmuted_count > 0:
+            res_lines.append(f"🔊 <i>Unmuted: {unmuted_count} members</i>")
+        if muted_count == 0 and unmuted_count == 0:
+            res_lines.append("<i>Non-members will be automatically muted when they join VC (and unmuted if they join group).</i>")
+        await msg.edit_text("\n".join(res_lines), parse_mode=ParseMode.HTML)
+
     elif arg in ["off", "disable", "no", "false", "0"]:
         update_chat_setting(chat_id, "vc_auto_mute_non_members_enabled", False)
         await update.message.reply_text("❌ <b>VC Auto-Mute Non-Members has been DISABLED.</b>", parse_mode=ParseMode.HTML)
+
+    elif arg in ["sync", "check", "scan", "run"]:
+        msg = await update.message.reply_text("🔍 <i>Checking VC participants and group membership...</i>", parse_mode=ParseMode.HTML)
+        muted_count, unmuted_count = await check_and_sync_vc_members(chat_id)
+        await msg.edit_text(
+            f"🔄 <b><u>VOICE CHAT MEMBER SYNC COMPLETED</u></b>\n\n"
+            f"🔇 <b>Auto-muted Non-Members:</b> <code>{muted_count}</code>\n"
+            f"🔊 <b>Unmuted Members:</b> <code>{unmuted_count}</code>",
+            parse_mode=ParseMode.HTML
+        )
     else:
-        await update.message.reply_text("⚠️ Invalid option. Use <code>/vcautomute on</code> or <code>/vcautomute off</code>.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("⚠️ Invalid option. Use <code>/vcautomute on</code>, <code>/vcautomute off</code>, or <code>/vcautomute sync</code>.", parse_mode=ParseMode.HTML)
 
 def get_voice_chat_handlers():
     """Returns handlers for voice chat events."""
@@ -1732,6 +1820,9 @@ def get_voice_chat_handlers():
 
 async def stop_voice_chat_monitor():
     """Stops the Telethon client."""
+    global _auto_vc_sync_task
+    if _auto_vc_sync_task and not _auto_vc_sync_task.done():
+        _auto_vc_sync_task.cancel()
     if telethon_client:
         await telethon_client.disconnect()
         logger.info("🎙 Voice Chat Monitor stopped.")

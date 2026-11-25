@@ -2873,8 +2873,8 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif "vc_" in key:
                 if key == "vc_auto_mute_non_members_enabled" and new_val:
                     try:
-                        from features.voice_chat import check_and_mute_non_members_in_vc
-                        asyncio.create_task(check_and_mute_non_members_in_vc(chat_id))
+                        from features.voice_chat import check_and_sync_vc_members
+                        asyncio.create_task(check_and_sync_vc_members(chat_id))
                     except Exception:
                         pass
                 await query.edit_message_reply_markup(reply_markup=get_vc_settings_keyboard(new_settings))
