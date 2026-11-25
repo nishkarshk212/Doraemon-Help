@@ -1055,6 +1055,7 @@ def get_vc_settings_keyboard(settings):
     vc_user_join_status = "✅" if settings.get("vc_user_join_enabled", True) else "❌"
     vc_user_leave_status = "✅" if settings.get("vc_user_leave_enabled", True) else "❌"
     vc_invite_status = "✅" if settings.get("vc_invite_notification_enabled", True) else "❌"
+    vc_auto_mute_status = "✅" if settings.get("vc_auto_mute_non_members_enabled", False) else "❌"
     vc_safety_status = "✅" if settings.get("vc_safety_enabled", False) else "❌"
     vc_panic_status = "✅" if settings.get("vc_panic_mode_enabled", False) else "❌"
     
@@ -1062,9 +1063,10 @@ def get_vc_settings_keyboard(settings):
         [InlineKeyboardButton(colored_button(f"User Join Notification: {vc_user_join_status}", "blue"), callback_data="set_toggle_vc_user_join_enabled")],
         [InlineKeyboardButton(colored_button(f"User Leave Notification: {vc_user_leave_status}", "blue"), callback_data="set_toggle_vc_user_leave_enabled")],
         [InlineKeyboardButton(colored_button(f"Invite Notification: {vc_invite_status}", "blue"), callback_data="set_toggle_vc_invite_notification_enabled")],
+        [InlineKeyboardButton(colored_button(f"Auto-Mute Non-Members: {vc_auto_mute_status}", "blue"), callback_data="set_toggle_vc_auto_mute_non_members_enabled")],
         [InlineKeyboardButton(colored_button(f"VC Safety (Anti-Ghost): {vc_safety_status}", "blue"), callback_data="set_toggle_vc_safety_enabled")],
         [InlineKeyboardButton(colored_button(f"VC Panic Mode: {vc_panic_status}", "blue"), callback_data="set_toggle_vc_panic_mode_enabled")],
-        [InlineKeyboardButton(colored_button("ℹ️ Voice chat related notifications", "blue"), callback_data="set_none")],
+        [InlineKeyboardButton(colored_button("ℹ️ Auto-mutes users in VC if not in group", "blue"), callback_data="set_none")],
         [InlineKeyboardButton(colored_button("🔙 Back", "blue"), callback_data="set_view_main")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -2280,7 +2282,8 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await edit_bot_response(
                 query, context,
                 "🎙 <b>ᴠᴏɪᴄᴇ ᴄʜᴀᴛ ꜱᴇᴛᴛɪɴɢꜱ 🎙</b>\n\n"
-                "ᴄᴏɴᴛʀᴏʟ ᴠᴏɪᴄᴇ ᴄʜᴀᴛ ʀᴇʟᴀᴛᴇᴅ ɴᴏᴛɪꜰɪᴄᴀᴛɪᴏɴꜱ ᴀɴᴅ ꜰᴇᴀᴛᴜʀᴇꜱ:",
+                "ᴄᴏɴᴛʀᴏʟ ᴠᴏɪᴄᴇ ᴄʜᴀᴛ ʀᴇʟᴀᴛᴇᴅ ɴᴏᴛɪꜰɪᴄᴀᴛɪᴏɴꜱ ᴀɴᴅ ꜰᴇᴀᴛᴜʀᴇꜱ:\n\n"
+                "• <b>Auto-Mute Non-Members:</b> Auto-mute users in VC who haven't joined the group.",
                 reply_markup=get_vc_settings_keyboard(settings),
                 parse_mode='HTML'
             )
@@ -2775,7 +2778,10 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_chat_setting(chat_id, "nightmode_apply_on", new_val)
         else:
             # Welcome, Goodbye, Clean and Auto Delete (specific types) settings enabled by default, others disabled by default
-            default_val = True if "welcome_" in key or "goodbye_" in key or "media_enabled" in key or "button_enabled" in key or "clean_" in key or "vc_" in key or "auto_delete_text" in key or "auto_delete_stickers" in key or "auto_delete_media" in key else False
+            if key in ("vc_safety_enabled", "vc_panic_mode_enabled", "vc_auto_mute_non_members_enabled"):
+                default_val = False
+            else:
+                default_val = True if "welcome_" in key or "goodbye_" in key or "media_enabled" in key or "button_enabled" in key or "clean_" in key or "vc_" in key or "auto_delete_text" in key or "auto_delete_stickers" in key or "auto_delete_media" in key else False
             new_val = not settings.get(key, default_val)
             update_chat_setting(chat_id, key, new_val)
         
@@ -2865,6 +2871,12 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif key.startswith("manager_"):
                 await query.edit_message_reply_markup(reply_markup=get_manager_settings_keyboard(new_settings))
             elif "vc_" in key:
+                if key == "vc_auto_mute_non_members_enabled" and new_val:
+                    try:
+                        from features.voice_chat import check_and_mute_non_members_in_vc
+                        asyncio.create_task(check_and_mute_non_members_in_vc(chat_id))
+                    except Exception:
+                        pass
                 await query.edit_message_reply_markup(reply_markup=get_vc_settings_keyboard(new_settings))
             elif "tagger" in key:
                 await query.edit_message_reply_markup(reply_markup=get_tagger_settings_keyboard(new_settings))

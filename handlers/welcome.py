@@ -606,6 +606,13 @@ async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TY
                 return
 
         await send_welcome(update.effective_chat, member, context)
+        
+        # If VC auto-mute non-members is enabled, unmute user in VC now that they joined
+        if settings.get("vc_auto_mute_non_members_enabled", False):
+            try:
+                from features.voice_chat import mute_vc_participant
+                asyncio.create_task(mute_vc_participant(chat_id, member.id, muted=False))
+            except Exception: pass
 
     # Trigger goodbye if transitioning from member to non-member
     is_leaving = (was_member and not is_member_now) or (old_status in active_statuses and new_status in inactive_statuses)
@@ -617,6 +624,14 @@ async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TY
                 from features.captcha import cancel_pending_captcha
                 cancel_pending_captcha(chat_id, member.id, context)
             except: pass
+            
+            # If VC auto-mute non-members is enabled, auto-mute user in VC upon leaving the group
+            if settings.get("vc_auto_mute_non_members_enabled", False):
+                try:
+                    from features.voice_chat import mute_vc_participant
+                    asyncio.create_task(mute_vc_participant(chat_id, member.id, muted=True))
+                except Exception: pass
+
             await send_goodbye(update.effective_chat, member, context)
 
 def get_welcome_handlers():

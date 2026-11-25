@@ -96,6 +96,7 @@ DEFAULT_CHAT_SETTINGS = {
     "manager_info_enabled": True,
     "vc_safety_enabled": False,
     "vc_panic_mode_enabled": False,
+    "vc_auto_mute_non_members_enabled": False,
     "tagger_enabled": True,
     # Captcha verification settings
     "captcha_enabled": False,
