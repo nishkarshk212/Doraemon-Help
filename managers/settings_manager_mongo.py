@@ -101,9 +101,13 @@ DEFAULT_CHAT_SETTINGS = {
     # Captcha verification settings
     "captcha_enabled": False,
     "captcha_vc_enabled": False,
+    "captcha_pm_mode": False,   # If True, sends newcomer verify button in group leading to PM captcha
     "captcha_type": "button", # "simple", "button", "digits", "image"
     "captcha_timeout": 120,    # seconds before action
     "captcha_action": "kick",  # "kick", "mute", "ban"
+    # Join Request settings
+    "join_request_enabled": True,
+    "join_request_mode": "manual", # "manual", "accept", "decline", "captcha"
     # Premium user boost gate
     "premium_boost_enabled": True,
     "premium_boost_count": 4,

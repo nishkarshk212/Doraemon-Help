@@ -185,6 +185,12 @@ def cancel_pending_captcha(chat_id, user_id, context=None):
                 import asyncio
                 asyncio.create_task(context.bot.delete_message(chat_id=chat_id, message_id=msg_id))
             except: pass
+        pm_msg_id = state.get("pm_message_id")
+        if pm_msg_id and context:
+            try:
+                import asyncio
+                asyncio.create_task(context.bot.delete_message(chat_id=user_id, message_id=pm_msg_id))
+            except: pass
 
 
 async def start_captcha_verification(chat, user, context: ContextTypes.DEFAULT_TYPE, added_by=None):
@@ -258,6 +264,72 @@ async def start_captcha_verification(chat, user, context: ContextTypes.DEFAULT_T
     safe_name = user_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     mention = f'<a href="tg://user?id={user_id}">{safe_name}</a>'
     
+    # Check if PM verification mode is enabled
+    pm_mode = settings.get("captcha_pm_mode", False)
+    if pm_mode:
+        bot_info = await context.bot.get_me()
+        bot_username = bot_info.username
+        verify_url = f"https://t.me/{bot_username}?start=verify_{chat_id}_{user_id}"
+        text = (
+            f"👋 Welcome {mention} to <b>{chat.title}</b>!\n\n"
+            f"🛡️ <b>Anti-Bot Verification</b>\n"
+            f"To send messages in this group, please verify that you are human in private within <b>{timeout}s</b>.\n\n"
+            f"👇 <i>Click the button below to solve the captcha in PM:</i>"
+        )
+        keyboard = [
+            [InlineKeyboardButton(colored_button("🔐 Verify in Private", "green"), url=verify_url)]
+        ]
+        try:
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logging.error(f"Error sending PM captcha group prompt: {e}")
+            msg = None
+
+        if not msg:
+            try:
+                await context.bot.restrict_chat_member(chat_id, user_id, permissions=UNRESTRICTED_PERMISSIONS)
+            except: pass
+            from handlers.welcome import send_welcome
+            await send_welcome(chat, user, context)
+            return
+
+        job = None
+        if context.job_queue:
+            try:
+                job = context.job_queue.run_once(
+                    captcha_timeout_job,
+                    timeout,
+                    data={"chat_id": chat_id, "user_id": user_id},
+                    name=f"cpt_timeout_{chat_id}_{user_id}"
+                )
+            except Exception as e:
+                logging.error(f"Failed to schedule captcha timeout job: {e}")
+
+        PENDING_CAPTCHAS[(chat_id, user_id)] = {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "chat": chat,
+            "user": user,
+            "type": test_type,
+            "answer": "",
+            "attempts": 0,
+            "max_attempts": 2,
+            "message_id": msg.message_id,
+            "job": job,
+            "timeout": timeout,
+            "action": action,
+            "created_at": time.time(),
+            "is_vc_join": False,
+            "is_pm_mode": True,
+            "pm_message_id": None
+        }
+        return
+
     msg = None
     correct_ans = ""
     
@@ -651,6 +723,19 @@ async def resolve_captcha_failure(chat_id, user_id, state, context: ContextTypes
             await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except: pass
 
+    # If PM verification prompt is active, notify/update PM message
+    pm_msg_id = state.get("pm_message_id")
+    if pm_msg_id:
+        try:
+            reason_pm = "timed out" if reason == "timeout" else "failed"
+            await context.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=pm_msg_id,
+                text=f"❌ <b>Verification {reason_pm.capitalize()}</b>\n\nYou did not complete the verification test.",
+                parse_mode=ParseMode.HTML
+            )
+        except: pass
+
     is_vc_join = state.get("is_vc_join", False)
     if is_vc_join:
         # Kick / remove user from VC
@@ -816,6 +901,610 @@ async def captcha_simple_message_handler(update: Update, context: ContextTypes.D
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Private Message (PM) Captcha Verification Handlers
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def handle_pm_captcha_start(update: Update, context: ContextTypes.DEFAULT_TYPE, start_arg: str):
+    """Handles deep-link from group to start captcha verification in PM."""
+    if not update.effective_user or not update.message:
+        return
+    user = update.effective_user
+    user_id = user.id
+
+    parts = start_arg.split("_")
+    if len(parts) < 3:
+        await update.message.reply_text("❌ Invalid verification link.")
+        return
+
+    try:
+        chat_id = int(parts[1])
+        target_user_id = int(parts[2])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid verification link parameters.")
+        return
+
+    if user_id != target_user_id:
+        await update.message.reply_text("❌ This verification link was generated for someone else.")
+        return
+
+    key = (chat_id, user_id)
+    state = PENDING_CAPTCHAS.get(key)
+    if not state:
+        await update.message.reply_text("⚠️ This verification session has already expired or been completed.")
+        return
+
+    chat_obj = state.get("chat")
+    chat_title = getattr(chat_obj, 'title', 'the group') if chat_obj else "the group"
+    test_type = state.get("type", "button")
+    timeout = state.get("timeout", 120)
+
+    if test_type == "simple":
+        text = (
+            f"👋 Hello <b>{user.first_name}</b>!\n\n"
+            f"🛡️ <b>Anti-Bot Verification for {chat_title}</b>\n"
+            f"Please <b>send any text message</b> in this private chat within <b>{timeout}s</b> to verify you are human."
+        )
+        pm_msg = await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        state["pm_message_id"] = pm_msg.message_id
+        return
+
+    elif test_type == "digits":
+        q_str, correct_ans, opt_list = generate_digits_challenge()
+        state["answer"] = correct_ans
+        text = (
+            f"👋 Hello <b>{user.first_name}</b>!\n\n"
+            f"🛡️ <b>Anti-Bot Verification for {chat_title}</b>\n"
+            f"Please solve this simple arithmetic problem within <b>{timeout}s</b>:\n\n"
+            f"👉 <b>{q_str} = ?</b>"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton(colored_button(opt_list[0], "blue"), callback_data=f"cpt_pm_ans_{chat_id}_{user_id}_{opt_list[0]}"),
+                InlineKeyboardButton(colored_button(opt_list[1], "blue"), callback_data=f"cpt_pm_ans_{chat_id}_{user_id}_{opt_list[1]}")
+            ],
+            [
+                InlineKeyboardButton(colored_button(opt_list[2], "blue"), callback_data=f"cpt_pm_ans_{chat_id}_{user_id}_{opt_list[2]}"),
+                InlineKeyboardButton(colored_button(opt_list[3], "blue"), callback_data=f"cpt_pm_ans_{chat_id}_{user_id}_{opt_list[3]}")
+            ]
+        ]
+        pm_msg = await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+        state["pm_message_id"] = pm_msg.message_id
+        return
+
+    elif test_type == "image":
+        img_buf, correct_ans, opt_list = generate_image_challenge()
+        state["answer"] = correct_ans
+        caption = (
+            f"👋 Hello <b>{user.first_name}</b>!\n\n"
+            f"🛡️ <b>Anti-Bot Verification for {chat_title}</b>\n"
+            f"Please recognize the characters on the image below within <b>{timeout}s</b>:"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton(colored_button(opt_list[0], "blue"), callback_data=f"cpt_pm_ans_{chat_id}_{user_id}_{opt_list[0]}"),
+                InlineKeyboardButton(colored_button(opt_list[1], "blue"), callback_data=f"cpt_pm_ans_{chat_id}_{user_id}_{opt_list[1]}")
+            ],
+            [
+                InlineKeyboardButton(colored_button(opt_list[2], "blue"), callback_data=f"cpt_pm_ans_{chat_id}_{user_id}_{opt_list[2]}"),
+                InlineKeyboardButton(colored_button(opt_list[3], "blue"), callback_data=f"cpt_pm_ans_{chat_id}_{user_id}_{opt_list[3]}")
+            ]
+        ]
+        pm_msg = await update.message.reply_photo(
+            photo=img_buf,
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+        state["pm_message_id"] = pm_msg.message_id
+        return
+
+    else:
+        text = (
+            f"👋 Hello <b>{user.first_name}</b>!\n\n"
+            f"🛡️ <b>Anti-Bot Verification for {chat_title}</b>\n"
+            f"Please press the verification button below within <b>{timeout}s</b> to confirm you are human:"
+        )
+        keyboard = [
+            [InlineKeyboardButton(colored_button("✅ I'm not a bot", "green"), callback_data=f"cpt_pm_btn_{chat_id}_{user_id}")]
+        ]
+        pm_msg = await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+        state["pm_message_id"] = pm_msg.message_id
+        return
+
+
+async def resolve_captcha_pm_success(chat_id, user_id, state, query_or_update, context: ContextTypes.DEFAULT_TYPE):
+    """Unmutes newcomer in group, cleans up prompt, and sends success DM."""
+    job = state.get("job")
+    if job:
+        try: job.schedule_removal()
+        except: pass
+
+    # Un-restrict user in group
+    try:
+        await context.bot.restrict_chat_member(chat_id, user_id, permissions=UNRESTRICTED_PERMISSIONS)
+    except Exception as e:
+        logging.warning(f"Failed to un-restrict user {user_id} in group {chat_id}: {e}")
+
+    # Delete group verification prompt message
+    msg_id = state.get("message_id")
+    if msg_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+
+    from features.join_request import get_group_link
+    group_url = await get_group_link(chat_id, context)
+
+    chat_obj = state.get("chat")
+    chat_title = getattr(chat_obj, 'title', 'the group') if chat_obj else "the group"
+
+    keyboard = None
+    if group_url:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(colored_button("💬 Open Group", "green"), url=group_url)]
+        ])
+
+    success_text = (
+        f"✅ <b>Verification Successful!</b>\n\n"
+        f"You have been verified and can now send messages in <b>{chat_title}</b>!"
+    )
+
+    try:
+        if hasattr(query_or_update, "edit_message_text"):
+            await query_or_update.edit_message_text(success_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        elif hasattr(query_or_update, "message") and query_or_update.message:
+            await query_or_update.message.reply_text(success_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logging.warning(f"Error editing PM success message: {e}")
+
+    # Trigger standard welcome in group if enabled
+    chat = state.get("chat")
+    user = state.get("user")
+    if chat and user:
+        from handlers.welcome import send_welcome
+        await send_welcome(chat, user, context)
+
+
+async def captcha_pm_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles button clicks for PM captcha verification."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    data = query.data
+    if not data.startswith("cpt_pm_btn_"):
+        return
+    parts = data.split("_")
+    if len(parts) < 5:
+        return
+    try:
+        chat_id = int(parts[3])
+        target_user_id = int(parts[4])
+    except ValueError:
+        return
+    clicker_id = query.from_user.id
+    if clicker_id != target_user_id:
+        await query.answer("❌ This button is not for you.", show_alert=True)
+        return
+
+    key = (chat_id, target_user_id)
+    state = PENDING_CAPTCHAS.pop(key, None)
+    if not state:
+        await query.answer("⚠️ This verification has expired or already been completed.", show_alert=True)
+        try: await query.message.delete()
+        except: pass
+        return
+
+    await query.answer("✅ Verification successful!")
+    await resolve_captcha_pm_success(chat_id, target_user_id, state, query, context)
+
+
+async def captcha_pm_options_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles option clicks for PM digits and image captchas."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    data = query.data
+    if not data.startswith("cpt_pm_ans_"):
+        return
+    parts = data.split("_", 5)
+    if len(parts) < 6:
+        return
+    try:
+        chat_id = int(parts[3])
+        target_user_id = int(parts[4])
+        selected_val = parts[5]
+    except (ValueError, IndexError):
+        return
+
+    clicker_id = query.from_user.id
+    if clicker_id != target_user_id:
+        await query.answer("❌ This option is not for you.", show_alert=True)
+        return
+
+    key = (chat_id, target_user_id)
+    state = PENDING_CAPTCHAS.get(key)
+    if not state:
+        await query.answer("⚠️ This verification has expired or already been completed.", show_alert=True)
+        try: await query.message.delete()
+        except: pass
+        return
+
+    correct_val = state.get("answer")
+    if selected_val == correct_val:
+        PENDING_CAPTCHAS.pop(key, None)
+        await query.answer("✅ Correct answer! Verification successful.")
+        await resolve_captcha_pm_success(chat_id, target_user_id, state, query, context)
+    else:
+        state["attempts"] += 1
+        if state["attempts"] >= state["max_attempts"]:
+            PENDING_CAPTCHAS.pop(key, None)
+            await query.answer("❌ Incorrect answer! Verification failed.", show_alert=True)
+            action = state.get("action", "kick")
+            try:
+                if action == "ban":
+                    await context.bot.ban_chat_member(chat_id, target_user_id)
+                elif action == "mute":
+                    await context.bot.restrict_chat_member(chat_id, target_user_id, permissions=RESTRICTED_PERMISSIONS)
+                else:
+                    await context.bot.ban_chat_member(chat_id, target_user_id)
+                    await context.bot.unban_chat_member(chat_id, target_user_id)
+            except Exception as e:
+                logging.error(f"Error applying penalty in group: {e}")
+
+            msg_id = state.get("message_id")
+            if msg_id:
+                try: await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                except: pass
+
+            fail_text = "❌ <b>Verification Failed!</b>\n\nYou failed the captcha verification test."
+            try:
+                await query.edit_message_text(fail_text, parse_mode=ParseMode.HTML)
+            except: pass
+        else:
+            remaining = state["max_attempts"] - state["attempts"]
+            await query.answer(f"❌ Incorrect answer! You have {remaining} attempt(s) remaining.", show_alert=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Join Request PM Captcha Verification Handlers
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def start_join_request_captcha(join_req, context: ContextTypes.DEFAULT_TYPE):
+    """Initiates captcha verification directly in PM for a ChatJoinRequest."""
+    chat = join_req.chat
+    user = join_req.from_user
+    chat_id = chat.id
+    user_id = user.id
+
+    if user.is_bot:
+        return
+
+    settings = get_chat_settings(chat_id)
+    test_type = settings.get("captcha_type", "button").lower()
+    timeout = int(settings.get("captcha_timeout", 120))
+
+    old_state = PENDING_CAPTCHAS.pop((chat_id, user_id), None)
+    if old_state:
+        old_job = old_state.get("job")
+        if old_job:
+            try: old_job.schedule_removal()
+            except: pass
+
+    correct_ans = ""
+    pm_msg = None
+
+    if test_type == "simple":
+        text = (
+            f"👋 Hello <b>{user.first_name}</b>!\n\n"
+            f"🛡️ You requested to join <b>{chat.title}</b>.\n"
+            f"Please <b>send any text message</b> in this private chat within <b>{timeout}s</b> to be approved:"
+        )
+        try:
+            pm_msg = await context.bot.send_message(chat_id=user_id, text=text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logging.warning(f"Could not send join request simple captcha DM to {user_id}: {e}")
+
+    elif test_type == "digits":
+        q_str, correct_ans, opt_list = generate_digits_challenge()
+        text = (
+            f"👋 Hello <b>{user.first_name}</b>!\n\n"
+            f"🛡️ You requested to join <b>{chat.title}</b>.\n"
+            f"Please solve this arithmetic problem within <b>{timeout}s</b> to be approved:\n\n"
+            f"👉 <b>{q_str} = ?</b>"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton(colored_button(opt_list[0], "blue"), callback_data=f"cpt_jr_ans_{chat_id}_{user_id}_{opt_list[0]}"),
+                InlineKeyboardButton(colored_button(opt_list[1], "blue"), callback_data=f"cpt_jr_ans_{chat_id}_{user_id}_{opt_list[1]}")
+            ],
+            [
+                InlineKeyboardButton(colored_button(opt_list[2], "blue"), callback_data=f"cpt_jr_ans_{chat_id}_{user_id}_{opt_list[2]}"),
+                InlineKeyboardButton(colored_button(opt_list[3], "blue"), callback_data=f"cpt_jr_ans_{chat_id}_{user_id}_{opt_list[3]}")
+            ]
+        ]
+        try:
+            pm_msg = await context.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logging.warning(f"Could not send join request digits captcha DM to {user_id}: {e}")
+
+    elif test_type == "image":
+        img_buf, correct_ans, opt_list = generate_image_challenge()
+        caption = (
+            f"👋 Hello <b>{user.first_name}</b>!\n\n"
+            f"🛡️ You requested to join <b>{chat.title}</b>.\n"
+            f"Please recognize the characters on the image within <b>{timeout}s</b> to be approved:"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton(colored_button(opt_list[0], "blue"), callback_data=f"cpt_jr_ans_{chat_id}_{user_id}_{opt_list[0]}"),
+                InlineKeyboardButton(colored_button(opt_list[1], "blue"), callback_data=f"cpt_jr_ans_{chat_id}_{user_id}_{opt_list[1]}")
+            ],
+            [
+                InlineKeyboardButton(colored_button(opt_list[2], "blue"), callback_data=f"cpt_jr_ans_{chat_id}_{user_id}_{opt_list[2]}"),
+                InlineKeyboardButton(colored_button(opt_list[3], "blue"), callback_data=f"cpt_jr_ans_{chat_id}_{user_id}_{opt_list[3]}")
+            ]
+        ]
+        try:
+            pm_msg = await context.bot.send_photo(
+                chat_id=user_id,
+                photo=img_buf,
+                caption=caption,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logging.warning(f"Could not send join request image captcha DM to {user_id}: {e}")
+
+    else:
+        test_type = "button"
+        text = (
+            f"👋 Hello <b>{user.first_name}</b>!\n\n"
+            f"🛡️ You requested to join <b>{chat.title}</b>.\n"
+            f"Please press the button below within <b>{timeout}s</b> to be approved:"
+        )
+        keyboard = [
+            [InlineKeyboardButton(colored_button("✅ I'm not a bot", "green"), callback_data=f"cpt_jr_btn_{chat_id}_{user_id}")]
+        ]
+        try:
+            pm_msg = await context.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logging.warning(f"Could not send join request button captcha DM to {user_id}: {e}")
+
+    if not pm_msg:
+        logging.warning(f"Failed to deliver join request captcha DM to user {user_id} for chat {chat_id}")
+        return
+
+    job = None
+    if context.job_queue:
+        try:
+            job = context.job_queue.run_once(
+                join_request_captcha_timeout_job,
+                timeout,
+                data={"chat_id": chat_id, "user_id": user_id},
+                name=f"cpt_jr_timeout_{chat_id}_{user_id}"
+            )
+        except Exception as e:
+            logging.error(f"Failed to schedule join request captcha timeout job: {e}")
+
+    PENDING_CAPTCHAS[(chat_id, user_id)] = {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "chat": chat,
+        "user": user,
+        "type": test_type,
+        "answer": correct_ans,
+        "attempts": 0,
+        "max_attempts": 2,
+        "message_id": pm_msg.message_id,
+        "job": job,
+        "timeout": timeout,
+        "action": "decline",
+        "created_at": time.time(),
+        "is_vc_join": False,
+        "is_join_request": True
+    }
+
+
+async def join_request_captcha_timeout_job(context: ContextTypes.DEFAULT_TYPE):
+    """Timeout job for join request captchas."""
+    data = context.job.data
+    chat_id = data.get("chat_id")
+    user_id = data.get("user_id")
+    state = PENDING_CAPTCHAS.pop((chat_id, user_id), None)
+    if not state:
+        return
+    try:
+        await context.bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
+        msg_id = state.get("message_id")
+        if msg_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=user_id,
+                    message_id=msg_id,
+                    text="❌ <b>Join Request Expired</b>\n\nYou did not complete verification in time. Your join request was declined.",
+                    parse_mode=ParseMode.HTML
+                )
+            except: pass
+    except Exception as e:
+        logging.warning(f"Error declining timed out join request for {user_id}: {e}")
+
+
+async def resolve_join_request_captcha_success(chat_id, user_id, state, query_or_update, context: ContextTypes.DEFAULT_TYPE):
+    """Approves newcomer's join request upon successful captcha solution in PM."""
+    job = state.get("job")
+    if job:
+        try: job.schedule_removal()
+        except: pass
+
+    try:
+        from features.join_request import record_approved_join_request
+        record_approved_join_request(chat_id, user_id)
+        await context.bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
+        logging.info(f"Approved join request via captcha for user {user_id} in {chat_id}")
+    except Exception as e:
+        logging.error(f"Failed to approve join request for {user_id} in {chat_id}: {e}")
+
+    from features.join_request import get_group_link
+    group_url = await get_group_link(chat_id, context)
+
+    chat_obj = state.get("chat")
+    chat_title = getattr(chat_obj, 'title', 'the group') if chat_obj else "the group"
+
+    keyboard = None
+    if group_url:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(colored_button("🚀 Enter Group", "blue"), url=group_url)]
+        ])
+
+    success_text = (
+        f"🎉 <b>Join Request Approved!</b>\n\n"
+        f"You have successfully passed the verification test.\n"
+        f"Welcome to <b>{chat_title}</b>!"
+    )
+
+    try:
+        if hasattr(query_or_update, "edit_message_text"):
+            await query_or_update.edit_message_text(success_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        elif hasattr(query_or_update, "message") and query_or_update.message:
+            await query_or_update.message.reply_text(success_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logging.warning(f"Error editing join request success message: {e}")
+
+    user = state.get("user")
+    if user:
+        user_mention = user.mention_html() if hasattr(user, "mention_html") else f"<code>{user_id}</code>"
+        from core.config import log_to_channel
+        await log_to_channel(context, f"✅ <b>Join Request Approved via Captcha</b>\nUser: {user_mention} (<code>{user_id}</code>)\nGroup: <b>{chat_title}</b>")
+
+
+async def captcha_jr_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles button clicks for join request captcha verification."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    data = query.data
+    if not data.startswith("cpt_jr_btn_"):
+        return
+    parts = data.split("_")
+    if len(parts) < 5:
+        return
+    try:
+        chat_id = int(parts[3])
+        target_user_id = int(parts[4])
+    except ValueError:
+        return
+
+    clicker_id = query.from_user.id
+    if clicker_id != target_user_id:
+        await query.answer("❌ This button is not for you.", show_alert=True)
+        return
+
+    key = (chat_id, target_user_id)
+    state = PENDING_CAPTCHAS.pop(key, None)
+    if not state:
+        await query.answer("⚠️ This request has expired or already been handled.", show_alert=True)
+        try: await query.message.delete()
+        except: pass
+        return
+
+    await query.answer("✅ Verification successful!")
+    await resolve_join_request_captcha_success(chat_id, target_user_id, state, query, context)
+
+
+async def captcha_jr_options_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles option clicks for join request digits and image captchas."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    data = query.data
+    if not data.startswith("cpt_jr_ans_"):
+        return
+    parts = data.split("_", 5)
+    if len(parts) < 6:
+        return
+    try:
+        chat_id = int(parts[3])
+        target_user_id = int(parts[4])
+        selected_val = parts[5]
+    except (ValueError, IndexError):
+        return
+
+    clicker_id = query.from_user.id
+    if clicker_id != target_user_id:
+        await query.answer("❌ This option is not for you.", show_alert=True)
+        return
+
+    key = (chat_id, target_user_id)
+    state = PENDING_CAPTCHAS.get(key)
+    if not state:
+        await query.answer("⚠️ This request has expired or already been handled.", show_alert=True)
+        try: await query.message.delete()
+        except: pass
+        return
+
+    correct_val = state.get("answer")
+    if selected_val == correct_val:
+        PENDING_CAPTCHAS.pop(key, None)
+        await query.answer("✅ Correct answer! Verification successful.")
+        await resolve_join_request_captcha_success(chat_id, target_user_id, state, query, context)
+    else:
+        state["attempts"] += 1
+        if state["attempts"] >= state["max_attempts"]:
+            PENDING_CAPTCHAS.pop(key, None)
+            await query.answer("❌ Incorrect answer! Verification failed.", show_alert=True)
+            try:
+                await context.bot.decline_chat_join_request(chat_id=chat_id, user_id=target_user_id)
+            except Exception as e:
+                logging.error(f"Error declining join request on captcha failure: {e}")
+
+            fail_text = "❌ <b>Verification Failed!</b>\n\nYour join request has been declined."
+            try:
+                await query.edit_message_text(fail_text, parse_mode=ParseMode.HTML)
+            except: pass
+        else:
+            remaining = state["max_attempts"] - state["attempts"]
+            await query.answer(f"❌ Incorrect answer! You have {remaining} attempt(s) remaining.", show_alert=True)
+
+
+async def captcha_pm_simple_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles text message sent by newcomers in PM when simple captcha mode is active."""
+    if not update.message or not update.effective_user or (update.effective_chat and update.effective_chat.type != "private"):
+        return
+    user_id = update.effective_user.id
+    matching_keys = [k for k, s in PENDING_CAPTCHAS.items() if k[1] == user_id and s.get("type") == "simple"]
+    if not matching_keys:
+        return
+    for key in matching_keys:
+        state = PENDING_CAPTCHAS.pop(key, None)
+        if not state:
+            continue
+        chat_id = key[0]
+        if state.get("is_join_request"):
+            await resolve_join_request_captcha_success(chat_id, user_id, state, update, context)
+        elif state.get("is_pm_mode"):
+            await resolve_captcha_pm_success(chat_id, user_id, state, update, context)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Admin Command: /captcha
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -846,11 +1535,13 @@ async def captcha_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_str = "✅ Enabled" if is_enabled else "❌ Disabled"
     vc_enabled = settings.get("captcha_vc_enabled", False)
     vc_status_str = "✅ Enabled" if vc_enabled else "❌ Disabled"
+    loc_str = "Private (PM)" if settings.get("captcha_pm_mode", False) else "Group Chat"
     
     text = (
         f"🛡️ <b>Captcha Verification Configuration</b>\n\n"
         f"Group Join Captcha: <b>{status_str}</b>\n"
         f"VC Join Captcha: <b>{vc_status_str}</b>\n"
+        f"Verification Location: <b>{loc_str}</b>\n"
         f"Test Type: <b>{test_type}</b>\n"
         f"Penalty on Failure: <b>{action}</b>\n"
         f"Timeout: <b>{timeout}s</b>\n\n"
@@ -870,5 +1561,10 @@ def get_captcha_handlers():
         CommandHandler("captcha", captcha_command),
         CallbackQueryHandler(captcha_button_callback, pattern=r"^cpt_btn_"),
         CallbackQueryHandler(captcha_options_callback, pattern=r"^cpt_ans_"),
+        CallbackQueryHandler(captcha_pm_button_callback, pattern=r"^cpt_pm_btn_"),
+        CallbackQueryHandler(captcha_pm_options_callback, pattern=r"^cpt_pm_ans_"),
+        CallbackQueryHandler(captcha_jr_button_callback, pattern=r"^cpt_jr_btn_"),
+        CallbackQueryHandler(captcha_jr_options_callback, pattern=r"^cpt_jr_ans_"),
         MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, captcha_simple_message_handler),
+        MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, captcha_pm_simple_message_handler),
     ]

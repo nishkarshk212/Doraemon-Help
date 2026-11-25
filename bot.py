@@ -119,6 +119,10 @@ async def start(update, context):
             from features.settings import show_settings_panel
             await show_settings_panel(update, context, group_chat_id, is_private=True)
             return
+        elif arg.startswith('verify_') or arg.startswith('cpt_'):
+            from features.captcha import handle_pm_captcha_start
+            await handle_pm_captcha_start(update, context, arg)
+            return
         elif arg.startswith('tz_'):
             group_chat_id = int(arg.split('_')[1])
             context.user_data['settings_chat_id'] = group_chat_id

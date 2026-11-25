@@ -90,28 +90,33 @@ async def _send_dm_multi_try(context, target_user_id, text, parse_mode, group_ch
 
     return None, errors
 
+async def get_group_link(group_chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """Helper to retrieve or export invite link for a group."""
+    try:
+        group_chat = await context.bot.get_chat(group_chat_id)
+        if getattr(group_chat, 'username', None):
+            return f"https://t.me/{group_chat.username}"
+        elif getattr(group_chat, 'invite_link', None):
+            return group_chat.invite_link
+        else:
+            try:
+                return await context.bot.export_chat_invite_link(group_chat_id)
+            except Exception as e:
+                logging.warning(f"Could not export invite link for group {group_chat_id}: {e}")
+                raw_id = abs(group_chat_id)
+                stripped_id = raw_id - 1000000000000 if raw_id > 1000000000000 else raw_id
+                return f"https://t.me/c/{stripped_id}/1"
+    except Exception as e:
+        logging.warning(f"Could not get group link for {group_chat_id}: {e}")
+        return None
+
 async def send_approval_dm(target_user_id: int, user_obj, group_chat, context: ContextTypes.DEFAULT_TYPE):
     """Sends join request approval confirmation message to user's private chat DM with direct group link."""
     try:
         group_title_html = (group_chat.title or "the group").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         group_chat_id = getattr(group_chat, 'id', None)
         
-        group_url = None
-        if getattr(group_chat, 'username', None):
-            group_url = f"https://t.me/{group_chat.username}"
-        elif getattr(group_chat, 'invite_link', None):
-            group_url = group_chat.invite_link
-        else:
-            try:
-                if group_chat_id:
-                    invite_link = await context.bot.export_chat_invite_link(group_chat_id)
-                    group_url = invite_link
-            except Exception as e:
-                logging.warning(f"Could not export invite link for group {group_chat_id}: {e}")
-                if group_chat_id:
-                    raw_id = abs(group_chat_id)
-                    stripped_id = raw_id - 1000000000000 if raw_id > 1000000000000 else raw_id
-                    group_url = f"https://t.me/c/{stripped_id}/1"
+        group_url = await get_group_link(group_chat_id, context) if group_chat_id else None
 
         if group_url:
             group_mention = f"<a href=\"{group_url}\">{group_title_html}</a>"
@@ -184,6 +189,11 @@ async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT
             await log_to_channel(context, f"❌ <b>Auto-Declined Join Request</b>\nUser: {user.mention_html()} (<code>{user_id}</code>)\nGroup: <b>{chat.title}</b>")
         except Exception as e:
             logging.error(f"Error declining join request for {user_id}: {e}", exc_info=True)
+
+    elif mode == "captcha":
+        from features.captcha import start_join_request_captcha
+        await start_join_request_captcha(join_req, context)
+        return
 
     else:
         # --- MANUAL MODE ---
@@ -271,6 +281,11 @@ async def join_request_command(update: Update, context: ContextTypes.DEFAULT_TYP
             update_chat_setting(chat_id, "join_request_mode", "decline")
             await send_bot_response(update, context, "❌ Join request mode set to: Auto-Decline (Declines all join requests).")
             return
+        elif sub in ["captcha", "bot", "verify"]:
+            update_chat_setting(chat_id, "join_request_enabled", True)
+            update_chat_setting(chat_id, "join_request_mode", "captcha")
+            await send_bot_response(update, context, "🤖 Join request mode set to: <b>Captcha in PM</b> (DMs captcha to user; auto-approves once solved).", parse_mode=ParseMode.HTML)
+            return
         elif sub in ["manual", "ask"]:
             update_chat_setting(chat_id, "join_request_enabled", True)
             update_chat_setting(chat_id, "join_request_mode", "manual")
@@ -280,6 +295,7 @@ async def join_request_command(update: Update, context: ContextTypes.DEFAULT_TYP
     status_btn_text = f"Join Requests: {'✅ Enabled' if is_enabled else '❌ Disabled'}"
     accept_label = "✅ Auto-Accept" + (" ✓" if current_mode == "accept" else "")
     decline_label = "❌ Auto-Decline" + (" ✓" if current_mode == "decline" else "")
+    captcha_label = "🤖 Captcha in PM" + (" ✓" if current_mode == "captcha" else "")
     manual_label = "⚙️ Manual Approval" + (" ✓" if current_mode == "manual" else "")
     off_label = "🚫 Turn Off" + (" ✓" if not is_enabled or current_mode == "off" else "")
 
@@ -292,7 +308,10 @@ async def join_request_command(update: Update, context: ContextTypes.DEFAULT_TYP
             InlineKeyboardButton(colored_button(decline_label, "blue"), callback_data="joinreq_set_decline"),
         ],
         [
+            InlineKeyboardButton(colored_button(captcha_label, "blue"), callback_data="joinreq_set_captcha"),
             InlineKeyboardButton(colored_button(manual_label, "blue"), callback_data="joinreq_set_manual"),
+        ],
+        [
             InlineKeyboardButton(colored_button(off_label, "blue"), callback_data="joinreq_set_off")
         ]
     ])
@@ -306,6 +325,7 @@ async def join_request_command(update: Update, context: ContextTypes.DEFAULT_TYP
         f"• <b>Enable/Disable:</b> Toggle entire join request processing on or off.\n"
         f"• <b>Auto-Accept:</b> Automatically approves join requests and sends welcome DM.\n"
         f"• <b>Auto-Decline:</b> Automatically declines join requests.\n"
+        f"• <b>Captcha in PM:</b> DMs verification captcha to user; approves automatically once solved.\n"
         f"• <b>Manual:</b> Prompts admins in group with Accept/Decline buttons.\n"
         f"• <b>Turn Off:</b> Ignore incoming join requests."
     )
@@ -353,6 +373,7 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
             status_btn_text = f"Join Requests: {'✅ Enabled' if is_enabled else '❌ Disabled'}"
             accept_label = "✅ Auto-Accept" + (" ✓" if current_mode == "accept" else "")
             decline_label = "❌ Auto-Decline" + (" ✓" if current_mode == "decline" else "")
+            captcha_label = "🤖 Captcha in PM" + (" ✓" if current_mode == "captcha" else "")
             manual_label = "⚙️ Manual Approval" + (" ✓" if current_mode == "manual" else "")
             off_label = "🚫 Turn Off" + (" ✓" if not is_enabled or current_mode == "off" else "")
 
@@ -365,7 +386,10 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     InlineKeyboardButton(colored_button(decline_label, "blue"), callback_data="joinreq_set_decline"),
                 ],
                 [
+                    InlineKeyboardButton(colored_button(captcha_label, "blue"), callback_data="joinreq_set_captcha"),
                     InlineKeyboardButton(colored_button(manual_label, "blue"), callback_data="joinreq_set_manual"),
+                ],
+                [
                     InlineKeyboardButton(colored_button(off_label, "blue"), callback_data="joinreq_set_off")
                 ]
             ])
@@ -378,6 +402,7 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 f"• <b>Enable/Disable:</b> Toggle entire join request processing on or off.\n"
                 f"• <b>Auto-Accept:</b> Automatically approves join requests.\n"
                 f"• <b>Auto-Decline:</b> Automatically declines join requests.\n"
+                f"• <b>Captcha in PM:</b> DMs verification captcha to user; approves automatically once solved.\n"
                 f"• <b>Manual:</b> Prompts admins in group with Accept/Decline buttons.\n"
                 f"• <b>Turn Off:</b> Ignore incoming join requests."
             )
@@ -409,6 +434,7 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
             status_btn_text = f"Join Requests: {'✅ Enabled' if is_enabled else '❌ Disabled'}"
             accept_label = "✅ Auto-Accept" + (" ✓" if current_mode == "accept" else "")
             decline_label = "❌ Auto-Decline" + (" ✓" if current_mode == "decline" else "")
+            captcha_label = "🤖 Captcha in PM" + (" ✓" if current_mode == "captcha" else "")
             manual_label = "⚙️ Manual Approval" + (" ✓" if current_mode == "manual" else "")
             off_label = "🚫 Turn Off" + (" ✓" if not is_enabled or current_mode == "off" else "")
 
@@ -421,7 +447,10 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     InlineKeyboardButton(colored_button(decline_label, "blue"), callback_data="joinreq_set_decline"),
                 ],
                 [
+                    InlineKeyboardButton(colored_button(captcha_label, "blue"), callback_data="joinreq_set_captcha"),
                     InlineKeyboardButton(colored_button(manual_label, "blue"), callback_data="joinreq_set_manual"),
+                ],
+                [
                     InlineKeyboardButton(colored_button(off_label, "blue"), callback_data="joinreq_set_off")
                 ]
             ])
@@ -434,6 +463,7 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 f"• <b>Enable/Disable:</b> Toggle entire join request processing on or off.\n"
                 f"• <b>Auto-Accept:</b> Automatically approves join requests.\n"
                 f"• <b>Auto-Decline:</b> Automatically declines join requests.\n"
+                f"• <b>Captcha in PM:</b> DMs verification captcha to user; approves automatically once solved.\n"
                 f"• <b>Manual:</b> Prompts admins in group with Accept/Decline buttons.\n"
                 f"• <b>Turn Off:</b> Ignore incoming join requests."
             )

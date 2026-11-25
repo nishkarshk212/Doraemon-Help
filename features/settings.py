@@ -589,6 +589,8 @@ def get_captcha_settings_keyboard(settings):
     status_str = "✅ Enabled" if is_enabled else "❌ Disabled"
     vc_enabled = settings.get("captcha_vc_enabled", False)
     vc_status_str = "✅ Enabled" if vc_enabled else "❌ Disabled"
+    pm_mode = settings.get("captcha_pm_mode", False)
+    loc_str = "🔐 Private (PM)" if pm_mode else "💬 Group Chat"
     test_type = settings.get("captcha_type", "button").capitalize()
     action = settings.get("captcha_action", "kick").capitalize()
     timeout = settings.get("captcha_timeout", 120)
@@ -596,6 +598,7 @@ def get_captcha_settings_keyboard(settings):
     keyboard = [
         [InlineKeyboardButton(colored_button(f"Group Captcha: {status_str}", "blue"), callback_data="set_toggle_captcha_enabled")],
         [InlineKeyboardButton(colored_button(f"VC Join Captcha: {vc_status_str}", "blue"), callback_data="set_toggle_captcha_vc_enabled")],
+        [InlineKeyboardButton(colored_button(f"Verification In: {loc_str}", "blue"), callback_data="set_toggle_captcha_pm_mode")],
         [InlineKeyboardButton(colored_button(f"📝 Test Type: {test_type}", "blue"), callback_data="set_view_captcha_type")],
         [InlineKeyboardButton(colored_button(f"⚡ Penalty: {action}", "blue"), callback_data="set_captcha_toggle_action")],
         [
@@ -1308,6 +1311,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_str = "✅ Enabled" if is_enabled else "❌ Disabled"
         vc_enabled = settings.get("captcha_vc_enabled", False)
         vc_status_str = "✅ Enabled" if vc_enabled else "❌ Disabled"
+        loc_str = "Private (PM)" if settings.get("captcha_pm_mode", False) else "Group Chat"
         test_type = settings.get("captcha_type", "button").capitalize()
         action = settings.get("captcha_action", "kick").capitalize()
         timeout = settings.get("captcha_timeout", 120)
@@ -1315,6 +1319,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🛡️ <b>Captcha Verification Configuration</b>\n\n"
             f"Group Join Captcha: <b>{status_str}</b>\n"
             f"VC Join Captcha: <b>{vc_status_str}</b>\n"
+            f"Verification Location: <b>{loc_str}</b>\n"
             f"Test Type: <b>{test_type}</b>\n"
             f"Penalty on Failure: <b>{action}</b>\n"
             f"Timeout: <b>{timeout}s</b>\n\n"
@@ -1343,6 +1348,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_str = "✅ Enabled" if is_enabled else "❌ Disabled"
         vc_enabled = settings.get("captcha_vc_enabled", False)
         vc_status_str = "✅ Enabled" if vc_enabled else "❌ Disabled"
+        loc_str = "Private (PM)" if settings.get("captcha_pm_mode", False) else "Group Chat"
         test_type = settings.get("captcha_type", "button").capitalize()
         action = settings.get("captcha_action", "kick").capitalize()
         timeout = settings.get("captcha_timeout", 120)
@@ -1350,6 +1356,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🛡️ <b>Captcha Verification Configuration</b>\n\n"
             f"Group Join Captcha: <b>{status_str}</b>\n"
             f"VC Join Captcha: <b>{vc_status_str}</b>\n"
+            f"Verification Location: <b>{loc_str}</b>\n"
             f"Test Type: <b>{test_type}</b>\n"
             f"Penalty on Failure: <b>{action}</b>\n"
             f"Timeout: <b>{timeout}s</b>\n\n"
@@ -1378,6 +1385,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_str = "✅ Enabled" if is_enabled else "❌ Disabled"
         vc_enabled = new_val
         vc_status_str = "✅ Enabled" if vc_enabled else "❌ Disabled"
+        loc_str = "Private (PM)" if settings.get("captcha_pm_mode", False) else "Group Chat"
         test_type = settings.get("captcha_type", "button").capitalize()
         action = settings.get("captcha_action", "kick").capitalize()
         timeout = settings.get("captcha_timeout", 120)
@@ -1385,6 +1393,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🛡️ <b>Captcha Verification Configuration</b>\n\n"
             f"Group Join Captcha: <b>{status_str}</b>\n"
             f"VC Join Captcha: <b>{vc_status_str}</b>\n"
+            f"Verification Location: <b>{loc_str}</b>\n"
             f"Test Type: <b>{test_type}</b>\n"
             f"Penalty on Failure: <b>{action}</b>\n"
             f"Timeout: <b>{timeout}s</b>\n\n"
@@ -1399,6 +1408,43 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except BadRequest: pass
         await query.answer(f"VC Join Captcha is now {vc_status_str}!")
+        return
+
+    if data == "set_toggle_captcha_pm_mode":
+        if not await can_user_configure_settings(chat_id, user_id, context):
+            await query.answer("❌ Only group admins can change this setting.", show_alert=True)
+            return
+        settings = get_chat_settings(chat_id)
+        new_val = not settings.get("captcha_pm_mode", False)
+        update_chat_setting(chat_id, "captcha_pm_mode", new_val)
+        settings = get_chat_settings(chat_id)
+        is_enabled = settings.get("captcha_enabled", False)
+        status_str = "✅ Enabled" if is_enabled else "❌ Disabled"
+        vc_enabled = settings.get("captcha_vc_enabled", False)
+        vc_status_str = "✅ Enabled" if vc_enabled else "❌ Disabled"
+        loc_str = "Private (PM)" if new_val else "Group Chat"
+        test_type = settings.get("captcha_type", "button").capitalize()
+        action = settings.get("captcha_action", "kick").capitalize()
+        timeout = settings.get("captcha_timeout", 120)
+        text = (
+            f"🛡️ <b>Captcha Verification Configuration</b>\n\n"
+            f"Group Join Captcha: <b>{status_str}</b>\n"
+            f"VC Join Captcha: <b>{vc_status_str}</b>\n"
+            f"Verification Location: <b>{loc_str}</b>\n"
+            f"Test Type: <b>{test_type}</b>\n"
+            f"Penalty on Failure: <b>{action}</b>\n"
+            f"Timeout: <b>{timeout}s</b>\n\n"
+            f"Newcomers must pass the verification test when joining the group or Voice Chat."
+        )
+        try:
+            await edit_bot_response(
+                query, context,
+                text,
+                reply_markup=get_captcha_settings_keyboard(settings),
+                parse_mode='HTML'
+            )
+        except BadRequest: pass
+        await query.answer(f"Verification Location set to: {loc_str}!")
         return
 
     if data == "set_view_captcha_type":
